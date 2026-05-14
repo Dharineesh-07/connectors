@@ -186,7 +186,7 @@ export default function ChatScreen({ route, navigation }) {
 
   const handleImagePick = async () => {
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.All,
+      mediaTypes: ['images', 'videos'],
       quality: 0.8,
     })
     if (result.canceled || !result.assets?.[0]) return
@@ -443,7 +443,7 @@ export default function ChatScreen({ route, navigation }) {
             <Text style={{ fontSize: 22 }}>📎</Text>
           </TouchableOpacity>
         )}
-        renderAccessory={() =>
+        renderChatFooter={() =>
           replyMessage ? (
             <View style={styles.replyBar}>
               <View style={styles.replyBarContent}>

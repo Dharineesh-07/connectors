@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { StyleSheet, Text, TouchableOpacity, View } from 'react-native'
-import { RTCView } from 'react-native-webrtc'
+import { RTCView } from '../utils/webrtcShim'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import Toast from 'react-native-toast-message'
 import { joinCall } from '../api/calls'
@@ -88,7 +88,7 @@ export default function CallScreen({ navigation }) {
     <View style={styles.container}>
       {isVideo ? (
         <>
-          {remoteStream ? (
+          {remoteStream && RTCView ? (
             <RTCView
               streamURL={remoteStream.toURL()}
               style={styles.remoteVideo}
@@ -102,7 +102,7 @@ export default function CallScreen({ navigation }) {
               />
             </View>
           )}
-          {localStream && (
+          {localStream && RTCView && (
             <RTCView
               streamURL={localStream.toURL()}
               style={[styles.localVideo, { top: insets.top + 16 }]}

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { 
   EyeIcon, 
@@ -55,9 +55,13 @@ const BUTTON_STYLE = (loading, isDanger = true) => ({
 })
 
 export default function Login() {
-  const { login } = useAuth()
+  const { login, user } = useAuth()
   const { theme, toggleTheme } = useTheme()
   const navigate = useNavigate()
+
+  useEffect(() => {
+    if (user) navigate('/', { replace: true })
+  }, [user])
   
   const [view, setView] = useState('login') // 'login' | 'forgot' | 'reset'
   const [email, setEmail] = useState('')
@@ -79,7 +83,6 @@ export default function Login() {
     setLoading(true)
     try {
       await login(email, password)
-      navigate('/')
     } catch (err) {
       setError(err.response?.data?.detail ?? 'Login failed. Check your credentials.')
     } finally {

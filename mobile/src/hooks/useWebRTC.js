@@ -4,7 +4,8 @@ import {
   RTCIceCandidate,
   RTCSessionDescription,
   mediaDevices,
-} from 'react-native-webrtc'
+  webRTCAvailable,
+} from '../utils/webrtcShim'
 import { useSocket } from '../context/SocketContext'
 
 const STUN = [{ urls: 'stun:stun.l.google.com:19302' }]
@@ -90,6 +91,7 @@ export function useWebRTC() {
 
   const initiateCall = useCallback(
     async (callId, conversationId, callType, turnCredentials) => {
+      if (!webRTCAvailable) return
       callIdRef.current = callId
       const pc = buildPC(turnCredentials)
       const stream = await getMedia(callType === 'video')
@@ -119,6 +121,7 @@ export function useWebRTC() {
 
   const answerCall = useCallback(
     async (callInfo, turnCredentials) => {
+      if (!webRTCAvailable) return
       callIdRef.current = callInfo.call_id
       const pc = buildPC(turnCredentials)
       const stream = await getMedia(callInfo.type === 'video')
@@ -163,6 +166,7 @@ export function useWebRTC() {
   }, [cleanup])
 
   useEffect(() => {
+    if (!webRTCAvailable) return
     const off1 = on('call:incoming', (data) => {
       incomingCallIdRef.current = data.call_id
       setIncomingCall(data)
