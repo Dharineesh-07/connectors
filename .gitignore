@@ -216,3 +216,30 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ── Node.js (frontend & mobile) ──────────────────────────────────────────────
+node_modules/
+.npm/
+yarn-error.log
+npm-debug.log*
+yarn-debug.log*
+.pnpm-debug.log*
+
+# ── Frontend (React / Vite) ───────────────────────────────────────────────────
+frontend/dist/
+.env.local
+.env.*.local
+
+# ── Mobile (Expo / React Native) ─────────────────────────────────────────────
+mobile/.expo/
+
+# Mobile code-signing secrets — never commit these
+*.jks
+*.p8
+*.p12
+*.mobileprovision
+
+# ── OS / editor noise ────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini

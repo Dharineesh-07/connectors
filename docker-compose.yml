@@ -93,7 +93,7 @@ services:
 
   web:
     build:
-      context: ./web
+      context: ./frontend
       dockerfile: Dockerfile.dev
     restart: unless-stopped
     environment:
@@ -101,7 +101,7 @@ services:
       VITE_BACKEND_WS_URL: ws://backend:8000
       CHOKIDAR_USEPOLLING: "true"
     volumes:
-      - ./web:/app
+      - ./frontend:/app
       - /app/node_modules
     ports:
       - "80:5173"

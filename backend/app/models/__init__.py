@@ -5,6 +5,7 @@ from app.models.call import Call, CallParticipant
 from app.models.notification import Notification
 from app.models.audit_log import AdminLog
 from app.models.password_reset import PasswordResetOTP
+from app.models.reminder import Reminder
 
 __all__ = [
     "User",
@@ -17,4 +18,5 @@ __all__ = [
     "Notification",
     "AdminLog",
     "PasswordResetOTP",
+    "Reminder",
 ]
