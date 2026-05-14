@@ -1,3 +1,6 @@
+# Run with: docker compose --env-file ./backend/.env up -d
+# Copy backend/.env.example to backend/.env and fill in values before first run.
+
 networks:
   orgchat-net:
     driver: bridge
