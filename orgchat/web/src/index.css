@@ -1,0 +1,678 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Design tokens ──────────────────────────────────────────────────────────── */
+:root {
+  --cn-red: #CC3333;
+  --cn-red-dark: #A52828;
+  --cn-red-light: #F5E6E6;
+  --cn-blue: #3399CC;
+  --cn-blue-dark: #2277AA;
+  --cn-blue-light: #E6F3FA;
+  --cn-charcoal: #2D3748;
+  --cn-gray-bg: #B8C4CE;
+  --cn-gray-100: #F4F6F8;
+  --cn-gray-200: #E8ECF0;
+  --cn-gray-400: #9AAAB8;
+  --cn-gray-600: #5A6A7A;
+  --cn-gray-800: #2D3748;
+  --cn-white: #FFFFFF;
+  --cn-online: #22C55E;
+  --cn-danger: #CC3333;
+  --cn-warning: #F59E0B;
+  --cn-success: #22C55E;
+  --cn-app-bg: #F4F6F8;
+  --cn-chat-bg: #EEF3F8;
+  --cn-chat-dot: rgba(51, 153, 204, 0.18);
+  --cn-input-bg: #FAFBFC;
+  --cn-focus-bg: #FFFFFF;
+  --cn-login-bg: linear-gradient(145deg, #F8FAFC 0%, #EEF3F8 52%, #E7EFF6 100%);
+  --cn-login-card: #FFFFFF;
+  --cn-login-footer: rgba(45, 55, 72, 0.52);
+  --cn-login-orb-red: rgba(204, 51, 51, 0.22);
+  --cn-login-orb-blue: rgba(51, 153, 204, 0.24);
+  --cn-login-orb-purple: rgba(120, 51, 180, 0.12);
+  --cn-error-bg: linear-gradient(90deg, #F5E6E6 0%, #FDF2F2 100%);
+  --cn-error-text: #A52828;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-full: 9999px;
+
+  --shadow-card: 0 2px 12px rgba(45, 55, 72, 0.10);
+  --shadow-modal: 0 12px 48px rgba(45, 55, 72, 0.22);
+  --shadow-sidebar: 2px 0 20px rgba(45, 55, 72, 0.10);
+  --shadow-glow-red: 0 0 24px rgba(204, 51, 51, 0.35);
+  --shadow-glow-blue: 0 0 24px rgba(51, 153, 204, 0.35);
+
+  --transition-fast: 150ms ease;
+  --transition-base: 250ms ease;
+}
+
+:root[data-theme='dark'] {
+  --cn-red: #F05B5B;
+  --cn-red-dark: #FF7474;
+  --cn-red-light: rgba(240, 91, 91, 0.16);
+  --cn-blue: #5DB7E5;
+  --cn-blue-dark: #85CDF0;
+  --cn-blue-light: rgba(93, 183, 229, 0.16);
+  --cn-charcoal: #F4F7FB;
+  --cn-gray-bg: #1E2A3A;
+  --cn-gray-100: #151F2B;
+  --cn-gray-200: #263446;
+  --cn-gray-400: #8090A5;
+  --cn-gray-600: #B4C0CE;
+  --cn-gray-800: #E8EEF6;
+  --cn-white: #101821;
+  --cn-online: #33D17A;
+  --cn-danger: #F05B5B;
+  --cn-warning: #FBBF24;
+  --cn-success: #33D17A;
+  --cn-app-bg: #0B1118;
+  --cn-chat-bg: #0D141D;
+  --cn-chat-dot: rgba(93, 183, 229, 0.14);
+  --cn-input-bg: #111C28;
+  --cn-focus-bg: #101821;
+  --cn-login-bg: linear-gradient(145deg, #18080A 0%, #131E2E 55%, #0C1A28 100%);
+  --cn-login-card: #101821;
+  --cn-login-footer: rgba(255, 255, 255, 0.38);
+  --cn-login-orb-red: rgba(204, 51, 51, 0.45);
+  --cn-login-orb-blue: rgba(51, 153, 204, 0.40);
+  --cn-login-orb-purple: rgba(120, 51, 180, 0.20);
+  --cn-error-bg: linear-gradient(90deg, rgba(240, 91, 91, 0.16) 0%, rgba(240, 91, 91, 0.08) 100%);
+  --cn-error-text: #FFB4B4;
+
+  --shadow-card: 0 2px 12px rgba(0, 0, 0, 0.30);
+  --shadow-modal: 0 18px 56px rgba(0, 0, 0, 0.42);
+  --shadow-sidebar: 2px 0 22px rgba(0, 0, 0, 0.34);
+}
+
+/* ── Global reset ───────────────────────────────────────────────────────────── */
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: var(--cn-app-bg);
+  color: var(--cn-gray-800);
+  transition: background-color var(--transition-base), color var(--transition-base);
+}
+
+/* ── Scrollbar ──────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--cn-gray-200);
+  border-radius: 2px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--cn-gray-400);
+}
+
+/* ── Brand gradient utilities ───────────────────────────────────────────────── */
+.cn-accent-bar {
+  background: linear-gradient(90deg, var(--cn-red) 0%, var(--cn-blue) 100%);
+}
+
+.cn-gradient-brand {
+  background: linear-gradient(135deg, var(--cn-red) 0%, var(--cn-blue) 100%);
+}
+
+.cn-gradient-brand-animated {
+  background: linear-gradient(135deg, #CC3333 0%, #993399 40%, #3399CC 100%);
+  background-size: 200% 200%;
+  animation: cn-gradient-flow 5s ease infinite;
+}
+
+.bg-cn-blue-light { background-color: var(--cn-blue-light); }
+.bg-cn-red-light { background-color: var(--cn-red-light); }
+.text-cn-blue { color: var(--cn-blue); }
+.text-cn-red { color: var(--cn-red); }
+.text-cn-gray-400 { color: var(--cn-gray-400); }
+.text-cn-gray-600 { color: var(--cn-gray-600); }
+.text-cn-charcoal { color: var(--cn-charcoal); }
+.bg-cn-white { background-color: var(--cn-white); }
+.shadow-card { box-shadow: var(--shadow-card); }
+.shadow-modal { box-shadow: var(--shadow-modal); }
+.border-cn-gray-200 { border-color: var(--cn-gray-200); }
+
+.cn-text-gradient {
+  background: linear-gradient(135deg, var(--cn-red) 0%, var(--cn-blue) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.cn-glass {
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+.cn-glass-dark {
+  background: rgba(45, 55, 72, 0.55);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.cn-glow-red {
+  box-shadow: var(--shadow-glow-red);
+}
+
+.cn-glow-blue {
+  box-shadow: var(--shadow-glow-blue);
+}
+
+/* ── Gradient message bubble (sent) ─────────────────────────────────────────── */
+.cn-bubble-sent {
+  background: linear-gradient(135deg, #CC3333 0%, #A52266 100%);
+  box-shadow: 0 4px 12px rgba(204, 51, 51, 0.30);
+}
+
+/* ── Sidebar header gradient ─────────────────────────────────────────────────── */
+.cn-sidebar-header {
+  background: linear-gradient(135deg, #CC3333 0%, #2D3748 60%, #2277AA 100%);
+}
+
+/* ── Animations ──────────────────────────────────────────────────────────────── */
+@keyframes cn-gradient-flow {
+  0% {
+    background-position: 0% 50%;
+  }
+
+  50% {
+    background-position: 100% 50%;
+  }
+
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+@keyframes cn-pulse-ring {
+  0% {
+    transform: scale(1);
+    opacity: 0.8;
+  }
+
+  100% {
+    transform: scale(2.2);
+    opacity: 0;
+  }
+}
+
+@keyframes cn-glow-pulse {
+
+  0%,
+  100% {
+    box-shadow: 0 0 8px rgba(204, 51, 51, 0.3);
+  }
+
+  50% {
+    box-shadow: 0 0 28px rgba(204, 51, 51, 0.7), 0 0 48px rgba(51, 153, 204, 0.3);
+  }
+}
+
+@keyframes cn-bounce-dot {
+
+  0%,
+  80%,
+  100% {
+    transform: translateY(0);
+  }
+
+  40% {
+    transform: translateY(-7px);
+  }
+}
+
+@keyframes cn-slide-in-right {
+  from {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes cn-slide-in-left {
+  from {
+    transform: translateX(-24px);
+    opacity: 0;
+  }
+
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes cn-fade-up {
+  from {
+    transform: translateY(20px);
+    opacity: 0;
+  }
+
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes cn-scale-in {
+  from {
+    transform: scale(0.88);
+    opacity: 0;
+  }
+
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes cn-float {
+
+  0%,
+  100% {
+    transform: translateY(0px);
+  }
+
+  50% {
+    transform: translateY(-12px);
+  }
+}
+
+@keyframes cn-blob {
+
+  0%,
+  100% {
+    border-radius: 60% 40% 30% 70% / 60% 30% 70% 40%;
+  }
+
+  50% {
+    border-radius: 30% 60% 70% 40% / 50% 60% 30% 60%;
+  }
+}
+
+@keyframes cn-spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes cn-shimmer {
+  from {
+    background-position: -200% center;
+  }
+
+  to {
+    background-position: 200% center;
+  }
+}
+
+@keyframes cn-badge-pop {
+  0% {
+    transform: scale(0.5);
+  }
+
+  70% {
+    transform: scale(1.2);
+  }
+
+  100% {
+    transform: scale(1);
+  }
+}
+
+/* ── Utility animation classes ───────────────────────────────────────────────── */
+.animate-cn-slide-in-right {
+  animation: cn-slide-in-right 220ms cubic-bezier(.34, 1.56, .64, 1) both;
+}
+
+.animate-cn-slide-in-left {
+  animation: cn-slide-in-left 220ms cubic-bezier(.34, 1.56, .64, 1) both;
+}
+
+.animate-cn-fade-up {
+  animation: cn-fade-up 300ms cubic-bezier(.34, 1.56, .64, 1) both;
+}
+
+.animate-cn-scale-in {
+  animation: cn-scale-in 350ms cubic-bezier(.34, 1.56, .64, 1) both;
+}
+
+.animate-cn-spin {
+  animation: cn-spin 800ms linear infinite;
+}
+
+.animate-cn-float {
+  animation: cn-float 3.5s ease-in-out infinite;
+}
+
+.animate-cn-blob {
+  animation: cn-blob 8s ease-in-out infinite;
+}
+
+.animate-cn-glow-pulse {
+  animation: cn-glow-pulse 2.5s ease-in-out infinite;
+}
+
+.animate-cn-badge-pop {
+  animation: cn-badge-pop 400ms cubic-bezier(.34, 1.56, .64, 1) both;
+}
+
+.animate-cn-gradient-flow {
+  animation: cn-gradient-flow 5s ease infinite;
+  background-size: 200% 200%;
+}
+
+.cn-pulse-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  animation: cn-pulse-ring 1.6s ease-out infinite;
+}
+
+.cn-typing-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--cn-blue);
+  animation: cn-bounce-dot 1.2s ease infinite;
+}
+
+.cn-typing-dot:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.cn-typing-dot:nth-child(3) {
+  animation-delay: 0.30s;
+}
+
+/* ── Chat background ─────────────────────────────────────────────────────────── */
+.cn-chat-bg {
+  background-color: var(--cn-chat-bg);
+  background-image:
+    radial-gradient(circle, var(--cn-chat-dot) 1.5px, transparent 1.5px);
+  background-size: 32px 32px;
+}
+
+/* ── Login background ────────────────────────────────────────────────────────── */
+.cn-login-bg {
+  background: var(--cn-login-bg);
+}
+
+/* ── Stat card hover lift ────────────────────────────────────────────────────── */
+.cn-stat-card {
+  transition: transform 200ms ease, box-shadow 200ms ease;
+}
+
+.cn-stat-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 12px 32px rgba(45, 55, 72, 0.16);
+}
+
+/* ── Conv item active indicator ──────────────────────────────────────────────── */
+.cn-conv-active {
+  background: linear-gradient(90deg, rgba(204, 51, 51, 0.12) 0%, rgba(204, 51, 51, 0.04) 100%);
+  border-left: 3px solid var(--cn-red);
+}
+
+/* ── Dynamic action buttons ─────────────────────────────────────────────────── */
+.cn-action-btn {
+  transition: all 300ms cubic-bezier(.34, 1.56, .64, 1);
+  letter-spacing: 0.025em;
+}
+
+.cn-action-btn--red {
+  background: linear-gradient(135deg, rgba(204, 51, 51, 0.10) 0%, rgba(204, 51, 51, 0.04) 100%);
+  color: var(--cn-red);
+  border: 1.5px solid rgba(204, 51, 51, 0.18);
+}
+
+.cn-action-btn--red:hover {
+  background: linear-gradient(135deg, #CC3333 0%, #AA2266 100%);
+  color: #fff;
+  border-color: transparent;
+  box-shadow: 0 6px 20px rgba(204, 51, 51, 0.40), 0 0 0 3px rgba(204, 51, 51, 0.10);
+  transform: translateY(-2px) scale(1.04);
+}
+
+.cn-action-btn--red:active {
+  transform: translateY(0) scale(0.97);
+  box-shadow: 0 2px 8px rgba(204, 51, 51, 0.25);
+}
+
+.cn-action-btn--blue {
+  background: linear-gradient(135deg, rgba(51, 153, 204, 0.10) 0%, rgba(51, 153, 204, 0.04) 100%);
+  color: var(--cn-blue);
+  border: 1.5px solid rgba(51, 153, 204, 0.18);
+}
+
+.cn-action-btn--blue:hover {
+  background: linear-gradient(135deg, #3399CC 0%, #2277AA 100%);
+  color: #fff;
+  border-color: transparent;
+  box-shadow: 0 6px 20px rgba(51, 153, 204, 0.40), 0 0 0 3px rgba(51, 153, 204, 0.10);
+  transform: translateY(-2px) scale(1.04);
+}
+
+.cn-action-btn--blue:active {
+  transform: translateY(0) scale(0.97);
+  box-shadow: 0 2px 8px rgba(51, 153, 204, 0.25);
+}
+
+/* Sweeping shine effect on hover */
+.cn-action-btn__shine {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(105deg,
+      transparent 30%,
+      rgba(255, 255, 255, 0.35) 50%,
+      transparent 70%);
+  transform: translateX(-110%);
+  z-index: 5;
+  pointer-events: none;
+}
+
+.cn-action-btn:hover .cn-action-btn__shine {
+  transform: translateX(110%);
+  transition: transform 600ms ease;
+}
+
+/* ── Dynamic call status badges ─────────────────────────────────────────────── */
+.cn-status-badge {
+  transition: all 250ms ease;
+}
+
+/* Pulsing ring animation for ongoing calls */
+@keyframes cn-pulse-ring {
+  0% {
+    opacity: 0.8;
+    transform: scale(0.5);
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(1.6);
+  }
+}
+
+.cn-status-pulse {
+  animation: cn-pulse-ring 1.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  opacity: 0;
+}
+
+/* Vibrating ring for ringing status */
+@keyframes cn-ring-vibrate {
+
+  0%,
+  100% {
+    transform: scale(1) rotate(0deg);
+  }
+
+  10% {
+    transform: scale(1.1) rotate(-3deg);
+  }
+
+  20% {
+    transform: scale(1.1) rotate(3deg);
+  }
+
+  30% {
+    transform: scale(1.1) rotate(-3deg);
+  }
+
+  40% {
+    transform: scale(1.05) rotate(2deg);
+  }
+
+  50% {
+    transform: scale(1) rotate(0deg);
+  }
+}
+
+.cn-status-ring {
+  animation: cn-ring-vibrate 1.2s ease-in-out infinite;
+}
+
+/* Ringing badge glow pulse */
+@keyframes cn-glow-pulse {
+
+  0%,
+  100% {
+    box-shadow: 0 0 8px var(--glow-color, rgba(245, 158, 11, 0.25));
+  }
+
+  50% {
+    box-shadow: 0 0 18px var(--glow-color, rgba(245, 158, 11, 0.4));
+  }
+}
+
+.cn-status-badge--ringing {
+  animation: cn-glow-pulse 1.5s ease-in-out infinite;
+  --glow-color: rgba(245, 158, 11, 0.3);
+}
+
+/* Pop-in animation for completed dot */
+@keyframes cn-dot-pop {
+  0% {
+    transform: scale(0);
+  }
+
+  60% {
+    transform: scale(1.4);
+  }
+
+  100% {
+    transform: scale(1);
+  }
+}
+
+.cn-status-dot--pop {
+  animation: cn-dot-pop 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+/* Missed badge subtle shake */
+@keyframes cn-missed-shake {
+
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+
+  20% {
+    transform: translateX(-1.5px);
+  }
+
+  40% {
+    transform: translateX(1.5px);
+  }
+
+  60% {
+    transform: translateX(-1px);
+  }
+
+  80% {
+    transform: translateX(1px);
+  }
+}
+
+.cn-status-badge--missed {
+  animation: cn-missed-shake 0.5s ease-in-out 1;
+  animation-delay: 0.3s;
+}
+
+/* ── Emoji Picker Customization ─────────────────────────────────────────────── */
+aside.EmojiPickerReact.epr-main {
+  --epr-search-input-height: 34px !important;
+  --epr-category-navigation-button-size: 22px !important;
+  --epr-emoji-size: 24px !important;
+  --epr-emoji-padding: 4px !important;
+  padding-top: 0 !important;
+}
+
+.epr-search-container {
+  display: flex !important;
+  align-items: center !important;
+  padding: 8px 12px 4px !important; /* Reduced padding */
+  gap: 8px !important;
+}
+
+.epr-search-container > input {
+  flex: 1 !important;
+  font-size: 13px !important;
+  border-radius: 10px !important;
+  height: 36px !important;
+  padding: 0 10px 0 36px !important;
+  background-position: 10px center !important; /* Align the magnifying glass icon */
+}
+
+.epr-search-container > .epr-search-icon {
+  left: 22px !important;
+  top: 50% !important;
+  transform: translateY(-50%) !important;
+}
+
+.epr-skin-tones {
+  position: static !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  display: flex !important;
+  align-items: center !important;
+}
+
+.epr-category-navigation {
+  padding: 0 8px !important;
+  height: 28px !important;
+}
+
+.epr-emoji-category-label {
+  display: none !important;
+}

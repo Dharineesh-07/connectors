@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <!-- Red C-shape: annular sector, outer r=14, inner r=9, gap on right (~120°) -->
+  <!-- Outer 60°: (16+14*cos60, 16+14*sin60)=(23,28.1) Outer 300°: (23, 3.9) -->
+  <!-- Inner 60°: (16+9*cos60, 16+9*sin60)=(20.5,23.8) Inner 300°: (20.5, 8.2) -->
+  <path d="M 23,28.1 A 14,14 0 1 1 23,3.9 L 20.5,8.2 A 9,9 0 1 0 20.5,23.8 Z" fill="#CC3333"/>
+  <!-- Blue filled circle -->
+  <circle cx="16" cy="16" r="8" fill="#3399CC"/>
+  <!-- Gray ring -->
+  <circle cx="16" cy="16" r="5" fill="none" stroke="#9AAAB8" stroke-width="1.8"/>
+  <!-- Dark center dot -->
+  <circle cx="16" cy="16" r="1.8" fill="#4A5568"/>
+</svg>
