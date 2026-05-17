@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "PowerShell(Get-ChildItem -Recurse \"d:\\\\chat\\\\orgchat\" | Where-Object { !$_.PSIsContainer } | Select-Object -ExpandProperty FullName | Sort-Object)"
+      "PowerShell(Get-ChildItem -Recurse \"d:\\\\chat\\\\orgchat\" | Where-Object { !$_.PSIsContainer } | Select-Object -ExpandProperty FullName | Sort-Object)",
+      "Bash(npm view *)"
     ]
   }
 }
