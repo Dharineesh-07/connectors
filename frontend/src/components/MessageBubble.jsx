@@ -103,7 +103,8 @@ export default function MessageBubble({
       const rect = dotBtnRef.current.getBoundingClientRect()
       // Approx height: emoji bar (56) + 2 base items (72) + own items (88) = ~216 max
       const menuHeight = isOwn ? 160 : 216
-      const openUp = rect.top > menuHeight
+      const spaceBelow = window.innerHeight - rect.bottom - 4
+      const openUp = spaceBelow < menuHeight && rect.top > menuHeight
 
       setMenuStyle({
         position: 'fixed',
@@ -152,6 +153,10 @@ export default function MessageBubble({
     acc[r.emoji] = (acc[r.emoji] || 0) + 1
     return acc
   }, {})
+
+  const minutesSinceSent = (Date.now() - new Date(message.created_at).getTime()) / 60000
+  const canEdit = isOwn && !isDeleted && minutesSinceSent <= 10
+  const canDelete = isOwn && !isDeleted && minutesSinceSent <= 30
 
   const showMenuTrigger = (hovered || menuOpen) && !isDeleted
 
@@ -207,27 +212,33 @@ export default function MessageBubble({
           <span>↪</span> Forward
         </button>
 
-        {isOwn && !isDeleted && (
+        {(canEdit || canDelete) && (
           <>
             <div className="border-t border-cn-gray-100 my-1" />
-            <button
-              onClick={startEdit}
-              className="w-full text-left px-4 py-2 text-sm text-cn-gray-700 hover:bg-cn-gray-100 flex items-center gap-2"
-            >
-              <span>✏️</span> Edit
-            </button>
-            <button
-              onClick={() => {
-                onDelete?.(message.id)
-                setMenuOpen(false)
-              }}
-              className="w-full text-left px-4 py-2 text-sm flex items-center gap-2"
-              style={{ color: 'var(--cn-danger)' }}
-              onMouseEnter={(e) => (e.currentTarget.style.background = '#fff1f1')}
-              onMouseLeave={(e) => (e.currentTarget.style.background = '')}
-            >
-              <span>🗑️</span> Delete
-            </button>
+            {canEdit && (
+              <button
+                onClick={startEdit}
+                className="w-full text-left px-4 py-2 text-sm text-cn-gray-700 hover:bg-cn-gray-100 flex items-center gap-2"
+                title="Edit (available for 10 min after sending)"
+              >
+                <span>✏️</span> Edit
+              </button>
+            )}
+            {canDelete && (
+              <button
+                onClick={() => {
+                  onDelete?.(message.id)
+                  setMenuOpen(false)
+                }}
+                className="w-full text-left px-4 py-2 text-sm flex items-center gap-2"
+                style={{ color: 'var(--cn-danger)' }}
+                title="Delete (available for 30 min after sending)"
+                onMouseEnter={(e) => (e.currentTarget.style.background = '#fff1f1')}
+                onMouseLeave={(e) => (e.currentTarget.style.background = '')}
+              >
+                <span>🗑️</span> Delete
+              </button>
+            )}
           </>
         )}
       </div>,
@@ -246,7 +257,7 @@ export default function MessageBubble({
       {!isOwn && <UserAvatar user={message.sender} size="sm" />}
 
       <div
-        className={`max-w-[70%] flex flex-col gap-0.5 ${isOwn ? 'items-end' : 'items-start'}`}
+        className={`max-w-[85%] sm:max-w-[70%] flex flex-col gap-0.5 ${isOwn ? 'items-end' : 'items-start'}`}
       >
         {!isOwn && (
           <span
@@ -416,7 +427,7 @@ export default function MessageBubble({
 
         {Object.keys(reactionGroups).length > 0 && (
           <div
-            className={`flex flex-wrap gap-1 mt-0.5 ${isOwn ? 'justify-end' : 'justify-start'}`}
+            className={`flex flex-wrap gap-1 mt-0.5 max-w-full ${isOwn ? 'justify-end' : 'justify-start'}`}
           >
             {Object.entries(reactionGroups).map(([emoji, count]) => (
               <span

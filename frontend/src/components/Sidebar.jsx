@@ -612,8 +612,6 @@ export default function Sidebar({ isOpen, onClose }) {
         <button
           onClick={() => handleNavClick('/calendar')}
           className={`flex-1 flex flex-col items-center gap-1 py-3 border-l border-cn-gray-100 transition-all ${
-            isAdmin ? 'border-r border-cn-gray-100' : ''
-          } ${
             window.location.pathname === '/calendar' ? 'text-cn-blue bg-cn-white shadow-sm' : 'text-cn-gray-400 hover:text-cn-gray-600'
           }`}
           title="Calendar & Tasks"
@@ -624,7 +622,7 @@ export default function Sidebar({ isOpen, onClose }) {
         {isAdmin && (
            <button
              onClick={() => setShowAdminModal(true)}
-             className="flex-1 flex flex-col items-center gap-1 py-3 text-cn-gray-400 hover:text-cn-red transition-all"
+             className="flex-1 flex flex-col items-center gap-1 py-3 border-l border-cn-gray-100 text-cn-gray-400 hover:text-cn-red transition-all"
              title="Admin Console"
            >
              <ShieldCheckIcon className="w-5 h-5" />

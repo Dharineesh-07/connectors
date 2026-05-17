@@ -60,6 +60,7 @@ export default function Chat() {
   const { onToggleSidebar } = useOutletContext()
   const { messages, hasMore, loading, loadMore, updateMessage } = useMessages(conversationId)
   const [activeSidebar, setActiveSidebar] = useState(null)
+  const [loadMoreHovered, setLoadMoreHovered] = useState(false)
   const [highlightedMessageId, setHighlightedMessageId] = useState(null)
   const [replyMessage, setReplyMessage] = useState(null)
   const [forwardMessage, setForwardMessage] = useState(null)
@@ -334,20 +335,15 @@ export default function Chat() {
                 disabled={loading}
                 className="text-xs font-semibold px-5 py-2 rounded-full transition-all duration-200 disabled:opacity-50"
                 style={{
-                  background: 'linear-gradient(135deg, rgba(51,153,204,0.15) 0%, rgba(51,153,204,0.08) 100%)',
-                  color: 'var(--cn-blue)',
+                  background: loadMoreHovered
+                    ? 'linear-gradient(135deg, #3399CC 0%, #2277AA 100%)'
+                    : 'linear-gradient(135deg, rgba(51,153,204,0.15) 0%, rgba(51,153,204,0.08) 100%)',
+                  color: loadMoreHovered ? '#fff' : 'var(--cn-blue)',
                   border: '1.5px solid rgba(51,153,204,0.25)',
+                  boxShadow: loadMoreHovered ? '0 4px 12px rgba(51,153,204,0.35)' : 'none',
                 }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = 'linear-gradient(135deg, #3399CC 0%, #2277AA 100%)'
-                  e.currentTarget.style.color = '#fff'
-                  e.currentTarget.style.boxShadow = '0 4px 12px rgba(51,153,204,0.35)'
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = 'linear-gradient(135deg, rgba(51,153,204,0.15) 0%, rgba(51,153,204,0.08) 100%)'
-                  e.currentTarget.style.color = 'var(--cn-blue)'
-                  e.currentTarget.style.boxShadow = 'none'
-                }}
+                onMouseEnter={() => setLoadMoreHovered(true)}
+                onMouseLeave={() => setLoadMoreHovered(false)}
               >
                 {loading ? '↑ Loading…' : '↑ Load earlier messages'}
               </button>
