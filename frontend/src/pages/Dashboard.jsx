@@ -27,6 +27,9 @@ export default function Dashboard() {
     isScreenSharing,
     remoteIsScreenSharing,
     toggleScreenShare,
+    isCameraOff,
+    remoteCameraStates,
+    toggleCamera,
   } = useCall()
 
   useEffect(() => {
@@ -77,6 +80,9 @@ export default function Dashboard() {
           isScreenSharing={isScreenSharing}
           remoteIsScreenSharing={remoteIsScreenSharing}
           onToggleScreenShare={toggleScreenShare}
+          isCameraOff={isCameraOff}
+          remoteCameraStates={remoteCameraStates}
+          onToggleCamera={toggleCamera}
           minimized={callMinimized}
           onMinimize={() => setCallMinimized(true)}
           onMaximize={() => setCallMinimized(false)}

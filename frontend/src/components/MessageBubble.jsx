@@ -1,8 +1,17 @@
 import { useEffect, useRef, useState } from 'react'
 import ReactDOM from 'react-dom'
 import dayjs from 'dayjs'
+import { DocumentIcon } from '@heroicons/react/24/outline'
 import UserAvatar from './UserAvatar'
 import ImageLightbox from './ImageLightbox'
+
+function formatFileSize(bytes) {
+  if (!bytes) return ''
+  const k = 1024
+  const sizes = ['B', 'KB', 'MB', 'GB']
+  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]
+}
 
 const IMAGE_EXTS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'avif'])
 const REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '😡']
@@ -291,7 +300,27 @@ export default function MessageBubble({
         <div
           className={`flex items-end gap-1 ${isOwn ? 'flex-row-reverse' : 'flex-row'}`}
         >
-          {isImage && !isDeleted ? (
+          {message.type === 'voice' && message.file_url && !isDeleted ? (
+            <div
+              className={`rounded-2xl ${isOwn ? 'rounded-br-sm' : 'rounded-bl-sm'} px-3 py-2`}
+              style={
+                isOwn
+                  ? { background: 'linear-gradient(135deg, #CC3333 0%, #A52266 100%)', boxShadow: '0 4px 14px rgba(204,51,51,0.35)' }
+                  : { background: 'var(--cn-white)', border: '1.5px solid var(--cn-gray-200)', boxShadow: 'var(--shadow-card)' }
+              }
+            >
+              <div className="flex items-center gap-2 mb-1">
+                <span className="text-sm">{isOwn ? '🎙' : '🎙'}</span>
+                <span className={`text-xs font-semibold ${isOwn ? 'text-white/80' : 'text-cn-gray-500'}`}>Voice message</span>
+              </div>
+              <audio
+                controls
+                src={message.file_url}
+                className="w-full max-w-[240px] h-8"
+                style={{ accentColor: isOwn ? '#fff' : 'var(--cn-blue)' }}
+              />
+            </div>
+          ) : isImage && !isDeleted ? (
             <>
               <div
                 className={`rounded-2xl overflow-hidden cursor-pointer transition-transform duration-150 hover:scale-[1.02] ${
@@ -395,11 +424,22 @@ export default function MessageBubble({
                   href={message.file_url}
                   target="_blank"
                   rel="noreferrer"
-                  className={`underline flex items-center gap-1 ${
-                    isOwn ? 'text-white/90' : 'text-cn-blue'
-                  }`}
+                  className="flex flex-col items-center gap-1.5 min-w-[110px]"
                 >
-                  📎 {message.file_name}
+                  <div className={`w-14 h-14 rounded-xl flex flex-col items-center justify-center gap-0.5 ${isOwn ? 'bg-white/20' : 'bg-cn-gray-100'}`}>
+                    <DocumentIcon className={`w-7 h-7 ${isOwn ? 'text-white' : 'text-cn-blue'}`} />
+                    <span className={`text-[9px] font-bold uppercase tracking-wide ${isOwn ? 'text-white/60' : 'text-cn-gray-500'}`}>
+                      {message.file_name?.split('.').pop()?.slice(0, 4) || 'FILE'}
+                    </span>
+                  </div>
+                  <p className={`text-xs font-medium text-center leading-tight max-w-[150px] truncate ${isOwn ? 'text-white/90' : 'text-cn-gray-800'}`}>
+                    {message.file_name}
+                  </p>
+                  {message.file_size > 0 && (
+                    <p className={`text-[10px] ${isOwn ? 'text-white/60' : 'text-cn-gray-400'}`}>
+                      {formatFileSize(message.file_size)}
+                    </p>
+                  )}
                 </a>
               ) : (
                 message.content

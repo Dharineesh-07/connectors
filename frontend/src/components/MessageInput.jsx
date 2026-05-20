@@ -4,6 +4,8 @@ import {
   PaperClipIcon,
   FaceSmileIcon,
   XMarkIcon,
+  MicrophoneIcon,
+  StopIcon,
 } from '@heroicons/react/24/outline'
 import EmojiPicker from 'emoji-picker-react'
 import { useTheme } from '../context/ThemeContext'
@@ -11,6 +13,7 @@ import { useTheme } from '../context/ThemeContext'
 export default function MessageInput({
   onSend,
   onFileUpload,
+  onVoiceMessage,
   onTyping,
   disabled,
   replyMessage,
@@ -20,8 +23,13 @@ export default function MessageInput({
   const [text, setText] = useState('')
   const [showEmoji, setShowEmoji] = useState(false)
   const [uploading, setUploading] = useState(false)
+  const [recording, setRecording] = useState(false)
+  const [recordingSeconds, setRecordingSeconds] = useState(0)
   const fileRef = useRef(null)
   const typingTimer = useRef(null)
+  const mediaRecorderRef = useRef(null)
+  const chunksRef = useRef([])
+  const recordTimerRef = useRef(null)
 
   const handleChange = (e) => {
     setText(e.target.value)
@@ -61,6 +69,50 @@ export default function MessageInput({
       e.target.value = ''
     }
   }
+
+  const startRecording = async () => {
+    if (!navigator.mediaDevices?.getUserMedia) return
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const mr = new MediaRecorder(stream, { mimeType: 'audio/webm' })
+      chunksRef.current = []
+      mr.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data) }
+      mr.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop())
+        const blob = new Blob(chunksRef.current, { type: 'audio/webm' })
+        setRecording(false)
+        setRecordingSeconds(0)
+        clearInterval(recordTimerRef.current)
+        if (blob.size > 0) {
+          const file = new File([blob], `voice-${Date.now()}.webm`, { type: 'audio/webm' })
+          await onVoiceMessage?.(file)
+        }
+      }
+      mr.start()
+      mediaRecorderRef.current = mr
+      setRecording(true)
+      setRecordingSeconds(0)
+      recordTimerRef.current = setInterval(() => setRecordingSeconds((s) => s + 1), 1000)
+    } catch {
+      // mic permission denied
+    }
+  }
+
+  const stopRecording = () => {
+    mediaRecorderRef.current?.stop()
+    mediaRecorderRef.current = null
+    clearInterval(recordTimerRef.current)
+  }
+
+  const handleVoiceToggle = () => {
+    if (recording) {
+      stopRecording()
+    } else {
+      startRecording()
+    }
+  }
+
+  const formatRecordTime = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 
   const hasText = text.trim().length > 0
 
@@ -138,41 +190,56 @@ export default function MessageInput({
           }}
         />
 
-        {/* Send button */}
-        <button
-          onClick={handleSend}
-          disabled={!hasText || disabled}
-          style={
-            hasText
-              ? {
-                  background: 'linear-gradient(135deg, #CC3333 0%, #3399CC 100%)',
-                  boxShadow: '0 4px 12px rgba(204,51,51,0.35)',
-                  transition: 'transform 150ms ease, box-shadow 150ms ease',
-                }
-              : {
-                  background: 'var(--cn-gray-200)',
-                  cursor: 'not-allowed',
-                }
-          }
-          className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 text-white"
-          onMouseEnter={(e) => {
-            if (hasText) {
+        {/* Recording timer */}
+        {recording && (
+          <span className="text-xs font-semibold flex-shrink-0" style={{ color: 'var(--cn-red)', minWidth: 36 }}>
+            {formatRecordTime(recordingSeconds)}
+          </span>
+        )}
+
+        {/* Send / Mic button */}
+        {hasText ? (
+          <button
+            onClick={handleSend}
+            disabled={disabled}
+            style={{
+              background: 'linear-gradient(135deg, #CC3333 0%, #3399CC 100%)',
+              boxShadow: '0 4px 12px rgba(204,51,51,0.35)',
+              transition: 'transform 150ms ease, box-shadow 150ms ease',
+            }}
+            className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 text-white"
+            onMouseEnter={(e) => {
               e.currentTarget.style.transform = 'scale(1.1)'
               e.currentTarget.style.boxShadow = '0 6px 16px rgba(204,51,51,0.50)'
-            }
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.transform = 'scale(1)'
-            e.currentTarget.style.boxShadow = hasText
-              ? '0 4px 12px rgba(204,51,51,0.35)'
-              : 'none'
-          }}
-        >
-          <PaperAirplaneIcon
-            className="w-4 h-4"
-            style={{ color: hasText ? '#fff' : 'var(--cn-gray-400)' }}
-          />
-        </button>
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.transform = 'scale(1)'
+              e.currentTarget.style.boxShadow = '0 4px 12px rgba(204,51,51,0.35)'
+            }}
+          >
+            <PaperAirplaneIcon className="w-4 h-4 text-white" />
+          </button>
+        ) : (
+          <button
+            onClick={handleVoiceToggle}
+            disabled={disabled}
+            style={{
+              background: recording
+                ? 'var(--cn-red)'
+                : 'linear-gradient(135deg, #CC3333 0%, #3399CC 100%)',
+              boxShadow: recording
+                ? '0 0 0 4px rgba(204,51,51,0.25)'
+                : '0 4px 12px rgba(204,51,51,0.35)',
+              transition: 'all 150ms ease',
+            }}
+            className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 text-white"
+            title={recording ? 'Stop recording' : 'Record voice message'}
+          >
+            {recording
+              ? <StopIcon className="w-4 h-4 text-white" />
+              : <MicrophoneIcon className="w-4 h-4 text-white" />}
+          </button>
+        )}
       </div>
     </div>
   )

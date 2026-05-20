@@ -57,6 +57,8 @@ export function useWebRTC() {
   const [incomingCall, setIncomingCall] = useState(null)
   const [isScreenSharing, setIsScreenSharing] = useState(false)
   const [remoteIsScreenSharing, setRemoteIsScreenSharing] = useState(false)
+  const [isCameraOff, setIsCameraOff] = useState(false)
+  const [remoteCameraStates, setRemoteCameraStates] = useState(new Map())
 
   function buildIceServers(turnCredentials) {
     const iceServers = [...STUN]
@@ -79,12 +81,21 @@ export function useWebRTC() {
     const pc = new RTCPeerConnection({ iceServers: buildIceServers(turnCredentials) })
     pcsRef.current.set(peerId, pc)
 
+    // One stream per peer — accumulate every track into it.
+    // Never replace the whole stream on each ontrack: if the dummy-video transceiver
+    // arrives with a different stream ID (or no stream), the fallback
+    // `new MediaStream([e.track])` would create a video-only stream and overwrite
+    // the audio stream, silencing the remote participant.
+    const remoteStream = new MediaStream()
+
     pc.ontrack = (e) => {
-      const stream = e.streams?.[0] ?? new MediaStream([e.track])
+      if (!remoteStream.getTrackById(e.track.id)) {
+        remoteStream.addTrack(e.track)
+      }
       setRemoteParticipants((prev) => {
         const next = new Map(prev)
         const existing = next.get(peerId) ?? { user: null, stream: null }
-        next.set(peerId, { ...existing, stream })
+        next.set(peerId, { ...existing, stream: remoteStream })
         return next
       })
     }
@@ -109,8 +120,16 @@ export function useWebRTC() {
     const pc = new RTCPeerConnection({ iceServers: buildIceServers(turnCredentials) })
     pendingPcRef.current = pc
 
+    // Same single-stream accumulation as buildPCForPeer — prevents the dummy-video
+    // ontrack from overwriting pendingStreamRef with a video-only MediaStream.
+    const pendingRemoteStream = new MediaStream()
+    pendingStreamRef.current = pendingRemoteStream
+
     pc.ontrack = (e) => {
-      pendingStreamRef.current = e.streams?.[0] ?? new MediaStream([e.track])
+      if (!pendingRemoteStream.getTrackById(e.track.id)) {
+        pendingRemoteStream.addTrack(e.track)
+      }
+      // pendingStreamRef.current is already pointing at pendingRemoteStream
     }
 
     pc.onicecandidate = (e) => {
@@ -151,47 +170,116 @@ export function useWebRTC() {
       ...(pendingPcRef.current ? [pendingPcRef.current] : []),
     ]
 
+    // Use getTransceivers() to locate the video sender reliably.
+    // getSenders().find(s => s.track?.kind === 'video') misses audio-only calls where
+    // the dummy video transceiver was added via addTransceiver('video') — its sender.track
+    // starts as null, so the kind check returns undefined, never 'video'.
+    function getVideoSender(pc) {
+      const t = pc.getTransceivers().find((tr) => tr.receiver?.track?.kind === 'video')
+      return t?.sender ?? null
+    }
+
     if (screenStreamRef.current) {
       screenStreamRef.current.getTracks().forEach((t) => t.stop())
       screenStreamRef.current = null
 
+      // Restore camera video track (null for voice-only calls → stops sending video)
+      const cameraVideoTrack = stream.getVideoTracks()[0] ?? null
       allPCs.forEach((pc) => {
-        stream.getTracks().forEach((track) => {
-          const sender = pc.getSenders().find((s) => s.track?.kind === track.kind)
-          if (sender) sender.replaceTrack(track)
-        })
+        const sender = getVideoSender(pc)
+        if (sender) sender.replaceTrack(cameraVideoTrack)
       })
 
       if (callIdRef.current) {
         emitRef.current('call:screen-share', { call_id: callIdRef.current, is_sharing: false })
       }
-      setLocalStream(stream)
       setIsScreenSharing(false)
     } else {
       try {
-        const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true })
+        // audio:false ensures the mic audio sender is never replaced during screen share
+        const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })
         screenStreamRef.current = screenStream
 
-        allPCs.forEach((pc) => {
-          screenStream.getTracks().forEach((track) => {
-            const sender = pc.getSenders().find((s) => s.track?.kind === track.kind)
-            if (sender) sender.replaceTrack(track)
-            track.onended = () => {
-              if (screenStreamRef.current) toggleScreenShare()
-            }
+        const videoTrack = screenStream.getVideoTracks()[0]
+        if (videoTrack) {
+          allPCs.forEach((pc) => {
+            const sender = getVideoSender(pc)
+            if (sender) sender.replaceTrack(videoTrack)
           })
-        })
+          videoTrack.onended = () => {
+            if (screenStreamRef.current) toggleScreenShare()
+          }
+        }
 
         if (callIdRef.current) {
           emitRef.current('call:screen-share', { call_id: callIdRef.current, is_sharing: true })
         }
-        setLocalStream(screenStream)
+        // localStream intentionally NOT changed — keeps mic/camera controls working
         setIsScreenSharing(true)
       } catch {
         // user cancelled
       }
     }
   }, [])
+
+  const toggleCamera = useCallback(async () => {
+    const stream = localStreamRef.current
+    const newCameraOff = !isCameraOff
+
+    function getVideoSender(pc) {
+      const t = pc.getTransceivers().find((tr) => tr.receiver?.track?.kind === 'video')
+      return t?.sender ?? null
+    }
+
+    const allPCs = [
+      ...pcsRef.current.values(),
+      ...(pendingPcRef.current ? [pendingPcRef.current] : []),
+    ]
+
+    if (!stream) {
+      setIsCameraOff(newCameraOff)
+      return
+    }
+
+    if (newCameraOff) {
+      // Stop video tracks to release the camera hardware (not just disable)
+      stream.getVideoTracks().forEach((t) => {
+        t.stop()
+        stream.removeTrack(t)
+      })
+      // Replace sender with a dummy so the video transceiver stays alive
+      allPCs.forEach((pc) => {
+        const sender = getVideoSender(pc)
+        if (sender) {
+          const dummy = createDummyVideoTrack()
+          sender.replaceTrack(dummy ?? null)
+        }
+      })
+    } else {
+      // Acquire camera and replace sender track
+      try {
+        const camStream = await navigator.mediaDevices.getUserMedia({ video: true })
+        const videoTrack = camStream.getVideoTracks()[0]
+        if (videoTrack) {
+          stream.addTrack(videoTrack)
+          allPCs.forEach((pc) => {
+            const sender = getVideoSender(pc)
+            if (sender) sender.replaceTrack(videoTrack)
+          })
+        }
+      } catch {
+        return
+      }
+    }
+
+    setIsCameraOff(newCameraOff)
+    if (callIdRef.current) {
+      emitRef.current('call:camera-toggle', {
+        call_id: callIdRef.current,
+        camera_on: !newCameraOff,
+      })
+    }
+  }, [isCameraOff])
 
   const cleanup = useCallback(() => {
     pcsRef.current.forEach((pc) => pc.close())
@@ -213,6 +301,8 @@ export function useWebRTC() {
     setCallState('idle')
     setIsScreenSharing(false)
     setRemoteIsScreenSharing(false)
+    setIsCameraOff(false)
+    setRemoteCameraStates(new Map())
   }, [])
 
   const initiateCall = useCallback(async (callId, conversationId, callType, turnCredentials) => {
@@ -233,6 +323,7 @@ export function useWebRTC() {
 
     setActiveCall({ call_id: callId, conversation_id: conversationId, type: callType })
     setCallState('calling')
+    setIsCameraOff(callType === 'audio')
 
     emitRef.current('call:initiate', {
       conversation_id: conversationId,
@@ -295,6 +386,7 @@ export function useWebRTC() {
     })
     setIncomingCall(null)
     setCallState('active')
+    setIsCameraOff(callInfo.type === 'audio')
 
     return stream
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -327,13 +419,28 @@ export function useWebRTC() {
       await pc.setRemoteDescription({ type: 'answer', sdp: data.answer_sdp })
       setCallState('active')
 
-      // Promote pending PC to a named entry keyed by the answerer's user_id
       const answererId = data.user_id
+
+      // Grab the accumulated stream before clearing pendingStreamRef.
+      const pendingStream = pendingStreamRef.current ?? new MediaStream()
+      pendingStreamRef.current = null
+
+      // Rewire ontrack to add late-arriving tracks into the SAME accumulated stream.
+      // Using the same object means the <audio>/<video> srcObject never needs to change.
+      pc.ontrack = (e) => {
+        if (!pendingStream.getTrackById(e.track.id)) {
+          pendingStream.addTrack(e.track)
+        }
+        setRemoteParticipants((prev) => {
+          const next = new Map(prev)
+          const existing = next.get(answererId) ?? { user: null, stream: null }
+          next.set(answererId, { ...existing, stream: pendingStream })
+          return next
+        })
+      }
+
       pcsRef.current.set(answererId, pc)
       pendingPcRef.current = null
-
-      const pendingStream = pendingStreamRef.current
-      pendingStreamRef.current = null
 
       setRemoteParticipants((prev) => {
         const next = new Map(prev)
@@ -380,6 +487,14 @@ export function useWebRTC() {
 
     const off6 = on('call:screen-share', (data) => {
       setRemoteIsScreenSharing(data.is_sharing)
+    })
+
+    const off13 = on('call:camera-toggle', (data) => {
+      setRemoteCameraStates((prev) => {
+        const next = new Map(prev)
+        next.set(data.user_id, !data.camera_on)
+        return next
+      })
     })
 
     // A new participant has joined the ongoing call — existing participants create offers to them
@@ -481,7 +596,7 @@ export function useWebRTC() {
     })
 
     return () => {
-      off1(); off2(); off3(); off4(); off5(); off6(); off7(); off8(); off9(); off10(); off11(); off12()
+      off1(); off2(); off3(); off4(); off5(); off6(); off7(); off8(); off9(); off10(); off11(); off12(); off13()
     }
   }, [on, cleanup])
 
@@ -493,10 +608,13 @@ export function useWebRTC() {
     remoteParticipants,
     isScreenSharing,
     remoteIsScreenSharing,
+    isCameraOff,
+    remoteCameraStates,
     initiateCall,
     answerCall,
     rejectCall,
     endCall,
     toggleScreenShare,
+    toggleCamera,
   }
 }

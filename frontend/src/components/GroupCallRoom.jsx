@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { PhoneXMarkIcon, MicrophoneIcon, VideoCameraIcon, ComputerDesktopIcon, UserPlusIcon, XMarkIcon, MagnifyingGlassIcon, ArrowsPointingOutIcon, MinusIcon } from '@heroicons/react/24/solid'
-import { MicrophoneIcon as MicOffIcon } from '@heroicons/react/24/outline'
+import { MicrophoneIcon as MicOffIcon, VideoCameraIcon as VideoCameraOffIcon } from '@heroicons/react/24/outline'
 import UserAvatar from './UserAvatar'
 import { listUsers } from '../api/users'
 import { inviteToCall } from '../api/calls'
@@ -10,11 +10,47 @@ function VideoTile({ stream, label, muted = false }) {
   const videoRef = useRef(null)
 
   useEffect(() => {
-    if (videoRef.current && stream) {
-      videoRef.current.srcObject = stream
-      videoRef.current.play().catch((e) => console.error('Play error:', e))
+    const el = videoRef.current
+    if (!el || !stream) return
+
+    el.srcObject = stream
+    // Start muted so the browser's autoplay policy always allows play() to succeed
+    // (browsers block unmuted autoplay for elements that start playing outside a
+    // synchronous user-gesture context, which is always the case for remote tracks
+    // that arrive after WebRTC negotiation completes). Once playing, we restore the
+    // intended muted state so audio works correctly.
+    el.muted = true
+
+    const applyMutedState = () => { el.muted = muted }
+
+    const tryPlay = () => {
+      el.play()
+        .then(applyMutedState)
+        .catch(() => {
+          // Muted play should never fail; if it somehow does, retry on interaction.
+          const resume = () => {
+            el.muted = muted
+            el.play().catch(() => {})
+          }
+          document.addEventListener('click', resume, { once: true })
+        })
     }
-  }, [stream])
+    tryPlay()
+
+    // Re-trigger play when a new track (e.g. video arriving after audio) is added
+    // to the same stream object, since the effect won't re-run for same reference.
+    stream.addEventListener('addtrack', tryPlay)
+    return () => {
+      stream.removeEventListener('addtrack', tryPlay)
+      el.srcObject = null
+    }
+  }, [stream]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Keep the DOM muted property in sync if muted prop changes independently.
+  useEffect(() => {
+    const el = videoRef.current
+    if (el) el.muted = muted
+  }, [muted])
 
   return (
     <div
@@ -30,7 +66,7 @@ function VideoTile({ stream, label, muted = false }) {
           autoPlay
           playsInline
           muted={muted}
-          className="w-full h-full object-cover"
+          className="absolute inset-0 w-full h-full object-cover"
         />
       ) : (
         <div className="flex flex-col items-center gap-2.5">
@@ -66,7 +102,18 @@ function VideoTile({ stream, label, muted = false }) {
 function AudioPlayer({ stream }) {
   const audioRef = useRef(null)
   useEffect(() => {
-    if (audioRef.current && stream) audioRef.current.srcObject = stream
+    const el = audioRef.current
+    if (!el || !stream) return
+    el.srcObject = stream
+    const tryPlay = () => {
+      el.play().catch(() => {
+        const resume = () => el.play().catch(() => {})
+        document.addEventListener('click', resume, { once: true })
+      })
+    }
+    tryPlay()
+    stream.addEventListener('addtrack', tryPlay)
+    return () => stream.removeEventListener('addtrack', tryPlay)
   }, [stream])
   return <audio ref={audioRef} autoPlay playsInline />
 }
@@ -98,12 +145,14 @@ export default function GroupCallRoom({
   isScreenSharing,
   remoteIsScreenSharing,
   onToggleScreenShare,
+  isCameraOff,
+  onToggleCamera,
+  remoteCameraStates,
   minimized = false,
   onMinimize,
   onMaximize,
 }) {
   const [muted, setMuted] = useState(false)
-  const [camOff, setCamOff] = useState(false)
   const [showInviteModal, setShowInviteModal] = useState(false)
   const [users, setUsers] = useState([])
   const [search, setSearch] = useState('')
@@ -113,10 +162,6 @@ export default function GroupCallRoom({
   useEffect(() => {
     localStream?.getAudioTracks().forEach((t) => { t.enabled = !muted })
   }, [localStream, muted])
-
-  useEffect(() => {
-    localStream?.getVideoTracks().forEach((t) => { t.enabled = !camOff })
-  }, [localStream, camOff])
 
   useEffect(() => {
     if (showInviteModal && users.length === 0) {
@@ -206,10 +251,11 @@ export default function GroupCallRoom({
         </button>
 
         {/* Keep audio playing while minimized */}
-        {!isVideo &&
-          participants.map(({ user, stream }) =>
-            stream ? <AudioPlayer key={user?.id} stream={stream} /> : null
-          )}
+        {participants.map(({ user, stream }) =>
+          (!isVideo || !stream?.getVideoTracks().length) && stream
+            ? <AudioPlayer key={user?.id} stream={stream} />
+            : null
+        )}
       </div>
     )
   }
@@ -268,9 +314,13 @@ export default function GroupCallRoom({
         </div>
       </div>
 
-      {/* Participant grid */}
+      {/* Participant grid / presentation layout */}
       <div
-        className={`flex-1 p-5 flex items-center justify-center ${shouldScroll ? 'overflow-y-auto custom-scrollbar' : 'overflow-hidden'}`}
+        className={`flex-1 p-5 flex items-center justify-center ${
+          isScreenSharing || remoteIsScreenSharing
+            ? 'overflow-hidden'
+            : shouldScroll ? 'overflow-y-auto custom-scrollbar' : 'overflow-hidden'
+        }`}
       >
         {callState === 'calling' && participants.length === 0 ? (
           <div className="flex flex-col items-center gap-5">
@@ -308,20 +358,87 @@ export default function GroupCallRoom({
               <PhoneXMarkIcon className="w-5 h-5 text-white" />
             </button>
           </div>
+        ) : (isScreenSharing || remoteIsScreenSharing) ? (
+          /* Presentation mode: large stage + thumbnail strip */
+          <div className="flex flex-col gap-3 w-full h-full">
+            {/* Main screen share stage */}
+            <div className="flex-1 min-h-0">
+              {isScreenSharing ? (
+                /* Show indicator instead of screen capture to prevent infinite mirror loop */
+                <div
+                  className="w-full h-full rounded-2xl flex flex-col items-center justify-center gap-3"
+                  style={{ backgroundColor: 'var(--cn-gray-200)', border: '1.5px solid var(--cn-gray-300)' }}
+                >
+                  <ComputerDesktopIcon className="w-12 h-12" style={{ color: 'var(--cn-blue)' }} />
+                  <p className="text-sm font-bold" style={{ color: 'var(--cn-charcoal)' }}>
+                    You are sharing your screen
+                  </p>
+                  <p className="text-xs" style={{ color: 'var(--cn-gray-400)' }}>
+                    Others can see your screen
+                  </p>
+                </div>
+              ) : (
+                <VideoTile
+                  stream={participants[0]?.stream ?? null}
+                  label={`${participants[0]?.user?.full_name ?? 'Unknown'} — screen`}
+                  muted={!isVideo}
+                />
+              )}
+            </div>
+            {/* Thumbnail strip */}
+            <div className="flex gap-2 h-28 shrink-0 overflow-x-auto">
+              {remoteIsScreenSharing ? (
+                /* Remote sharing: thumbnails = local + remaining participants */
+                <>
+                  <div key="local" className="w-44 shrink-0">
+                    <VideoTile
+                      stream={isVideo ? localStream : null}
+                      label={localUser?.full_name ?? 'You'}
+                      muted
+                    />
+                  </div>
+                  {participants.slice(1).map(({ user, stream: pStream }) => (
+                    <div key={user?.id ?? 'unknown'} className="w-44 shrink-0">
+                      <VideoTile stream={isVideo ? pStream : null} label={user?.full_name ?? 'Unknown'} />
+                    </div>
+                  ))}
+                </>
+              ) : (
+                /* Local sharing: thumbnails = camera feed + all remote participants */
+                <>
+                  {isVideo && (
+                    <div key="local" className="w-44 shrink-0">
+                      <VideoTile stream={localStream} label={localUser?.full_name ?? 'You'} muted />
+                    </div>
+                  )}
+                  {participants.map(({ user, stream: pStream }) => (
+                    <div key={user?.id ?? 'unknown'} className="w-44 shrink-0">
+                      <VideoTile stream={isVideo ? pStream : null} label={user?.full_name ?? 'Unknown'} />
+                    </div>
+                  ))}
+                </>
+              )}
+            </div>
+          </div>
         ) : (
+          /* Normal grid layout */
           <div
             className={`grid gap-4 w-full mx-auto ${maxContainerWidth}`}
             style={{ gridTemplateColumns: `repeat(${gridCols}, minmax(0, 1fr))` }}
           >
             <VideoTile
-              stream={isVideo || isScreenSharing ? localStream : null}
+              stream={!isCameraOff ? localStream : null}
               label={localUser?.full_name ?? 'You'}
               muted
             />
             {participants.map(({ user, stream }) => (
               <VideoTile
                 key={user?.id ?? 'unknown'}
-                stream={isVideo || remoteIsScreenSharing ? stream : null}
+                stream={
+                  (isVideo || remoteCameraStates?.has(user?.id)) && !remoteCameraStates?.get(user?.id)
+                    ? stream
+                    : null
+                }
                 label={user?.full_name ?? 'Unknown'}
               />
             ))}
@@ -348,15 +465,15 @@ export default function GroupCallRoom({
               : <MicrophoneIcon className="w-4 h-4" />}
           </ControlBtn>
 
-          {isVideo && (
-            <ControlBtn
-              onClick={() => setCamOff(v => !v)}
-              active={camOff}
-              title={camOff ? 'Turn camera on' : 'Turn camera off'}
-            >
-              <VideoCameraIcon className="w-4 h-4" />
-            </ControlBtn>
-          )}
+          <ControlBtn
+            onClick={onToggleCamera}
+            active={false}
+            title={isCameraOff ? 'Turn camera on' : 'Turn camera off'}
+          >
+            {isCameraOff
+              ? <VideoCameraOffIcon className="w-4 h-4" />
+              : <VideoCameraIcon className="w-4 h-4" />}
+          </ControlBtn>
 
           <ControlBtn
             onClick={onToggleScreenShare}

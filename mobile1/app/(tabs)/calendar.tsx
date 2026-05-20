@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
+  ActivityIndicator,
   Alert,
   Modal,
   Pressable,
@@ -15,11 +16,42 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
-import { CN, INITIAL_REMINDERS, type Reminder } from '@/data/static';
+import { CN } from '@/data/static';
+import {
+  listReminders,
+  createReminder,
+  updateReminder,
+  deleteReminder,
+  toRFC3339,
+  extractDate,
+  extractTime,
+  type ApiReminder,
+} from '@/api/reminders';
 
 const MONTH_NAMES = ['January','February','March','April','May','June',
   'July','August','September','October','November','December'];
 const DAY_NAMES = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+type UIReminder = {
+  id: string;
+  title: string;
+  date: string;  // YYYY-MM-DD
+  time: string;  // HH:MM
+  completed: boolean;
+  due_date: string; // RFC3339 — kept for PATCH calls
+};
+
+function apiToUI(r: ApiReminder): UIReminder {
+  return {
+    id:        r.id,
+    title:     r.title,
+    date:      extractDate(r.due_date),
+    time:      extractTime(r.due_date),
+    completed: r.is_completed,
+    due_date:  r.due_date,
+  };
+}
 
 // ── Calendar helpers ──────────────────────────────────────────────────────────
 function getDaysInMonth(year: number, month: number) {
@@ -41,36 +73,46 @@ function todayStr(): string {
 // ── ReminderModal ─────────────────────────────────────────────────────────────
 function ReminderModal({ visible, reminder, defaultDate, onSave, onClose, isDark }: {
   visible: boolean;
-  reminder: Reminder | null;
+  reminder: UIReminder | null;
   defaultDate: string;
-  onSave: (r: Reminder) => void;
+  onSave: (r: UIReminder) => void;
   onClose: () => void;
   isDark: boolean;
 }) {
   const c = isDark ? CN.dark : CN.light;
-  const [title, setTitle] = useState(reminder?.title ?? '');
-  const [date, setDate]   = useState(reminder?.date  ?? defaultDate);
-  const [time, setTime]   = useState(reminder?.time  ?? '09:00');
+  const [title, setTitle] = useState('');
+  const [date, setDate]   = useState(defaultDate);
+  const [time, setTime]   = useState('09:00');
   const [error, setError] = useState('');
-
-  const handleSave = () => {
-    if (!title.trim()) { setError('Please enter a title.'); return; }
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { setError('Date must be YYYY-MM-DD.'); return; }
-    if (!/^\d{2}:\d{2}$/.test(time))        { setError('Time must be HH:MM.'); return; }
-    onSave({
-      id: reminder?.id ?? `r_${Date.now()}`,
-      title: title.trim(),
-      date,
-      time,
-      completed: reminder?.completed ?? false,
-    });
-  };
+  const [saving, setSaving] = useState(false);
 
   const handleOpen = () => {
     setTitle(reminder?.title ?? '');
-    setDate(reminder?.date ?? defaultDate);
-    setTime(reminder?.time ?? '09:00');
+    setDate(reminder?.date  ?? defaultDate);
+    setTime(reminder?.time  ?? '09:00');
     setError('');
+  };
+
+  const handleSave = async () => {
+    if (!title.trim()) { setError('Please enter a title.'); return; }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { setError('Date must be YYYY-MM-DD.'); return; }
+    if (!/^\d{2}:\d{2}$/.test(time))        { setError('Time must be HH:MM.'); return; }
+    setSaving(true);
+    setError('');
+    try {
+      const dueDate = toRFC3339(date, time);
+      let saved: ApiReminder;
+      if (reminder) {
+        saved = await updateReminder(reminder.id, { title: title.trim(), due_date: dueDate });
+      } else {
+        saved = await createReminder(title.trim(), dueDate);
+      }
+      onSave(apiToUI(saved));
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Failed to save reminder');
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -149,9 +191,12 @@ function ReminderModal({ visible, reminder, defaultDate, onSave, onClose, isDark
               style={[styles.footerBtn, { borderColor: c.border }]}>
               <Text style={[styles.footerBtnText, { color: c.label }]}>Cancel</Text>
             </TouchableOpacity>
-            <TouchableOpacity onPress={handleSave}
-              style={[styles.footerBtn, styles.saveBtn]}>
-              <Text style={styles.saveBtnText}>Save</Text>
+            <TouchableOpacity onPress={handleSave} disabled={saving}
+              style={[styles.footerBtn, styles.saveBtn, { opacity: saving ? 0.6 : 1 }]}>
+              {saving
+                ? <ActivityIndicator color="#fff" size="small" />
+                : <Text style={styles.saveBtnText}>Save</Text>
+              }
             </TouchableOpacity>
           </View>
         </Pressable>
@@ -173,9 +218,25 @@ export default function CalendarScreen() {
   const [year, setYear]         = useState(todayDate.getFullYear());
   const [month, setMonth]       = useState(todayDate.getMonth());
   const [selected, setSelected] = useState(today);
-  const [reminders, setReminders] = useState<Reminder[]>(INITIAL_REMINDERS);
+  const [reminders, setReminders] = useState<UIReminder[]>([]);
+  const [loading, setLoading]     = useState(true);
   const [modalVisible, setModalVisible] = useState(false);
-  const [editTarget, setEditTarget]     = useState<Reminder | null>(null);
+  const [editTarget, setEditTarget]     = useState<UIReminder | null>(null);
+
+  const fetchReminders = useCallback(async () => {
+    try {
+      const data = await listReminders();
+      setReminders(data.map(apiToUI));
+    } catch {
+      setReminders([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchReminders();
+  }, [fetchReminders]);
 
   const goToPrevMonth = () => {
     if (month === 0) { setYear(y => y - 1); setMonth(11); }
@@ -194,13 +255,12 @@ export default function CalendarScreen() {
   const daysInMonth = getDaysInMonth(year, month);
   const firstDay    = getFirstDayOfWeek(year, month);
 
-  // Build grid cells: nulls for leading empty, then 1..daysInMonth
   const cells: (number | null)[] = [
     ...Array(firstDay).fill(null),
     ...Array.from({ length: daysInMonth }, (_, i) => i + 1),
   ];
 
-  const remindersByDate: Record<string, Reminder[]> = {};
+  const remindersByDate: Record<string, UIReminder[]> = {};
   for (const r of reminders) {
     if (!remindersByDate[r.date]) remindersByDate[r.date] = [];
     remindersByDate[r.date].push(r);
@@ -209,21 +269,34 @@ export default function CalendarScreen() {
   const selectedReminders = remindersByDate[selected] ?? [];
   const totalCount = reminders.filter(r => !r.completed).length;
 
-  const toggleCompleted = (id: string) => {
-    setReminders(prev => prev.map(r => r.id === id ? { ...r, completed: !r.completed } : r));
+  const toggleCompleted = async (r: UIReminder) => {
+    const next = !r.completed;
+    setReminders(prev => prev.map(x => x.id === r.id ? { ...x, completed: next } : x));
+    try {
+      await updateReminder(r.id, { is_completed: next });
+    } catch {
+      setReminders(prev => prev.map(x => x.id === r.id ? { ...x, completed: r.completed } : x));
+    }
   };
 
-  const deleteReminder = (id: string) => {
+  const handleDeleteReminder = (r: UIReminder) => {
     Alert.alert('Delete Reminder', 'Are you sure?', [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: () => setReminders(prev => prev.filter(r => r.id !== id)) },
+      { text: 'Delete', style: 'destructive', onPress: async () => {
+        setReminders(prev => prev.filter(x => x.id !== r.id));
+        try {
+          await deleteReminder(r.id);
+        } catch {
+          setReminders(prev => [r, ...prev]);
+        }
+      }},
     ]);
   };
 
   const openCreate = () => { setEditTarget(null); setModalVisible(true); };
-  const openEdit   = (r: Reminder) => { setEditTarget(r); setModalVisible(true); };
+  const openEdit   = (r: UIReminder) => { setEditTarget(r); setModalVisible(true); };
 
-  const handleSave = (r: Reminder) => {
+  const handleSave = (r: UIReminder) => {
     setReminders(prev => {
       const idx = prev.findIndex(x => x.id === r.id);
       if (idx >= 0) {
@@ -269,151 +342,157 @@ export default function CalendarScreen() {
         </View>
       </View>
 
-      <ScrollView showsVerticalScrollIndicator={false}
-        contentContainerStyle={{ paddingBottom: insets.bottom + 20 }}>
-
-        {/* Month navigator */}
-        <View style={[styles.monthNav, { backgroundColor: c.card, borderBottomColor: c.border }]}>
-          <TouchableOpacity onPress={goToPrevMonth} style={styles.navArrow}>
-            <Ionicons name="chevron-back" size={20} color={c.text} />
-          </TouchableOpacity>
-          <TouchableOpacity onPress={goToToday}>
-            <Text style={[styles.monthLabel, { color: c.text }]}>
-              {MONTH_NAMES[month]} {year}
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity onPress={goToNextMonth} style={styles.navArrow}>
-            <Ionicons name="chevron-forward" size={20} color={c.text} />
-          </TouchableOpacity>
+      {loading ? (
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+          <ActivityIndicator color={CN.red} />
         </View>
+      ) : (
+        <ScrollView showsVerticalScrollIndicator={false}
+          contentContainerStyle={{ paddingBottom: insets.bottom + 20 }}>
 
-        {/* Day-of-week headers */}
-        <View style={[styles.calGrid, { backgroundColor: c.card }]}>
-          <View style={styles.dayNamesRow}>
-            {DAY_NAMES.map(d => (
-              <Text key={d} style={[styles.dayName, { color: c.label }]}>{d}</Text>
-            ))}
-          </View>
-
-          {/* Calendar cells */}
-          <View style={styles.cellsGrid}>
-            {cells.map((day, idx) => {
-              if (!day) return <View key={`e${idx}`} style={styles.cell} />;
-              const dateStr = toDateStr(year, month, day);
-              const isToday    = dateStr === today;
-              const isSel      = dateStr === selected;
-              const hasReminder = (remindersByDate[dateStr]?.length ?? 0) > 0;
-
-              return (
-                <TouchableOpacity
-                  key={dateStr}
-                  onPress={() => setSelected(dateStr)}
-                  style={[
-                    styles.cell,
-                    isSel && styles.cellSelected,
-                    isToday && !isSel && styles.cellToday,
-                  ]}
-                >
-                  <Text style={[
-                    styles.cellText,
-                    { color: isSel ? '#fff' : isToday ? CN.red : c.text },
-                    isSel && styles.cellTextSelected,
-                  ]}>
-                    {day}
-                  </Text>
-                  {hasReminder && (
-                    <View style={[styles.cellDot, { backgroundColor: isSel ? 'rgba(255,255,255,0.8)' : CN.red }]} />
-                  )}
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-        </View>
-
-        {/* Reminders for selected date */}
-        <View style={styles.remindersSection}>
-          <View style={styles.remindersHeader}>
-            <Text style={[styles.remindersTitle, { color: c.text }]}>
-              {selected === today ? "Today's Reminders" : `Reminders for ${selected}`}
-            </Text>
-            <TouchableOpacity onPress={openCreate} style={[styles.addReminderBtn, { backgroundColor: CN.red }]}>
-              <Ionicons name="add" size={14} color="#fff" />
-              <Text style={styles.addReminderText}>Add</Text>
+          {/* Month navigator */}
+          <View style={[styles.monthNav, { backgroundColor: c.card, borderBottomColor: c.border }]}>
+            <TouchableOpacity onPress={goToPrevMonth} style={styles.navArrow}>
+              <Ionicons name="chevron-back" size={20} color={c.text} />
+            </TouchableOpacity>
+            <TouchableOpacity onPress={goToToday}>
+              <Text style={[styles.monthLabel, { color: c.text }]}>
+                {MONTH_NAMES[month]} {year}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={goToNextMonth} style={styles.navArrow}>
+              <Ionicons name="chevron-forward" size={20} color={c.text} />
             </TouchableOpacity>
           </View>
 
-          {selectedReminders.length === 0 ? (
-            <View style={[styles.emptyReminders, { backgroundColor: c.card, borderColor: c.border }]}>
-              <Ionicons name="alarm-outline" size={28} color={c.label} />
-              <Text style={[styles.emptyReminderText, { color: c.label }]}>No reminders for this day</Text>
-              <TouchableOpacity onPress={openCreate}
-                style={[styles.emptyAddBtn, { backgroundColor: CN.blueLight }]}>
-                <Text style={[styles.emptyAddText, { color: CN.blue }]}>Add a reminder</Text>
+          {/* Day-of-week headers */}
+          <View style={[styles.calGrid, { backgroundColor: c.card }]}>
+            <View style={styles.dayNamesRow}>
+              {DAY_NAMES.map(d => (
+                <Text key={d} style={[styles.dayName, { color: c.label }]}>{d}</Text>
+              ))}
+            </View>
+
+            {/* Calendar cells */}
+            <View style={styles.cellsGrid}>
+              {cells.map((day, idx) => {
+                if (!day) return <View key={`e${idx}`} style={styles.cell} />;
+                const dateStr = toDateStr(year, month, day);
+                const isToday    = dateStr === today;
+                const isSel      = dateStr === selected;
+                const hasReminder = (remindersByDate[dateStr]?.length ?? 0) > 0;
+
+                return (
+                  <TouchableOpacity
+                    key={dateStr}
+                    onPress={() => setSelected(dateStr)}
+                    style={[
+                      styles.cell,
+                      isSel && styles.cellSelected,
+                      isToday && !isSel && styles.cellToday,
+                    ]}
+                  >
+                    <Text style={[
+                      styles.cellText,
+                      { color: isSel ? '#fff' : isToday ? CN.red : c.text },
+                      isSel && styles.cellTextSelected,
+                    ]}>
+                      {day}
+                    </Text>
+                    {hasReminder && (
+                      <View style={[styles.cellDot, { backgroundColor: isSel ? 'rgba(255,255,255,0.8)' : CN.red }]} />
+                    )}
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </View>
+
+          {/* Reminders for selected date */}
+          <View style={styles.remindersSection}>
+            <View style={styles.remindersHeader}>
+              <Text style={[styles.remindersTitle, { color: c.text }]}>
+                {selected === today ? "Today's Reminders" : `Reminders for ${selected}`}
+              </Text>
+              <TouchableOpacity onPress={openCreate} style={[styles.addReminderBtn, { backgroundColor: CN.red }]}>
+                <Ionicons name="add" size={14} color="#fff" />
+                <Text style={styles.addReminderText}>Add</Text>
               </TouchableOpacity>
             </View>
-          ) : (
-            selectedReminders.map(r => (
-              <View key={r.id} style={[styles.reminderCard, { backgroundColor: c.card, borderColor: c.border }]}>
-                <TouchableOpacity onPress={() => toggleCompleted(r.id)} style={styles.reminderCheck}>
-                  <View style={[
-                    styles.checkbox,
-                    { borderColor: r.completed ? CN.online : c.border },
-                    r.completed && { backgroundColor: CN.online },
-                  ]}>
-                    {r.completed && <Ionicons name="checkmark" size={12} color="#fff" />}
-                  </View>
+
+            {selectedReminders.length === 0 ? (
+              <View style={[styles.emptyReminders, { backgroundColor: c.card, borderColor: c.border }]}>
+                <Ionicons name="alarm-outline" size={28} color={c.label} />
+                <Text style={[styles.emptyReminderText, { color: c.label }]}>No reminders for this day</Text>
+                <TouchableOpacity onPress={openCreate}
+                  style={[styles.emptyAddBtn, { backgroundColor: CN.blueLight }]}>
+                  <Text style={[styles.emptyAddText, { color: CN.blue }]}>Add a reminder</Text>
                 </TouchableOpacity>
-
-                <View style={styles.reminderContent}>
-                  <Text style={[
-                    styles.reminderTitle,
-                    { color: c.text },
-                    r.completed && { textDecorationLine: 'line-through', color: c.label },
-                  ]}>
-                    {r.title}
-                  </Text>
-                  <View style={styles.reminderMeta}>
-                    <Ionicons name="alarm-outline" size={12} color={c.label} />
-                    <Text style={[styles.reminderTime, { color: c.label }]}>{r.time}</Text>
-                  </View>
-                </View>
-
-                <View style={styles.reminderActions}>
-                  <TouchableOpacity onPress={() => openEdit(r)} style={styles.iconBtn}>
-                    <Ionicons name="pencil-outline" size={16} color={c.label} />
-                  </TouchableOpacity>
-                  <TouchableOpacity onPress={() => deleteReminder(r.id)} style={styles.iconBtn}>
-                    <Ionicons name="trash-outline" size={16} color={CN.red} />
-                  </TouchableOpacity>
-                </View>
               </View>
-            ))
-          )}
-        </View>
+            ) : (
+              selectedReminders.map(r => (
+                <View key={r.id} style={[styles.reminderCard, { backgroundColor: c.card, borderColor: c.border }]}>
+                  <TouchableOpacity onPress={() => toggleCompleted(r)} style={styles.reminderCheck}>
+                    <View style={[
+                      styles.checkbox,
+                      { borderColor: r.completed ? CN.online : c.border },
+                      r.completed && { backgroundColor: CN.online },
+                    ]}>
+                      {r.completed && <Ionicons name="checkmark" size={12} color="#fff" />}
+                    </View>
+                  </TouchableOpacity>
 
-        {/* All upcoming reminders summary */}
-        {reminders.filter(r => !r.completed && r.date >= today && r.date !== selected).length > 0 && (
-          <View style={styles.upcomingSection}>
-            <Text style={[styles.upcomingTitle, { color: c.label }]}>UPCOMING</Text>
-            {reminders
-              .filter(r => !r.completed && r.date >= today && r.date !== selected)
-              .sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time))
-              .slice(0, 5)
-              .map(r => (
-                <TouchableOpacity key={r.id} onPress={() => setSelected(r.date)}
-                  style={[styles.upcomingItem, { backgroundColor: c.card, borderColor: c.border }]}>
-                  <View style={[styles.upcomingDot, { backgroundColor: CN.blue }]} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.upcomingItemTitle, { color: c.text }]}>{r.title}</Text>
-                    <Text style={[styles.upcomingItemDate, { color: c.label }]}>{r.date} at {r.time}</Text>
+                  <View style={styles.reminderContent}>
+                    <Text style={[
+                      styles.reminderTitle,
+                      { color: c.text },
+                      r.completed && { textDecorationLine: 'line-through', color: c.label },
+                    ]}>
+                      {r.title}
+                    </Text>
+                    <View style={styles.reminderMeta}>
+                      <Ionicons name="alarm-outline" size={12} color={c.label} />
+                      <Text style={[styles.reminderTime, { color: c.label }]}>{r.time}</Text>
+                    </View>
                   </View>
-                  <Ionicons name="chevron-forward" size={16} color={c.label} />
-                </TouchableOpacity>
+
+                  <View style={styles.reminderActions}>
+                    <TouchableOpacity onPress={() => openEdit(r)} style={styles.iconBtn}>
+                      <Ionicons name="pencil-outline" size={16} color={c.label} />
+                    </TouchableOpacity>
+                    <TouchableOpacity onPress={() => handleDeleteReminder(r)} style={styles.iconBtn}>
+                      <Ionicons name="trash-outline" size={16} color={CN.red} />
+                    </TouchableOpacity>
+                  </View>
+                </View>
               ))
-            }
+            )}
           </View>
-        )}
-      </ScrollView>
+
+          {/* Upcoming reminders summary */}
+          {reminders.filter(r => !r.completed && r.date >= today && r.date !== selected).length > 0 && (
+            <View style={styles.upcomingSection}>
+              <Text style={[styles.upcomingTitle, { color: c.label }]}>UPCOMING</Text>
+              {reminders
+                .filter(r => !r.completed && r.date >= today && r.date !== selected)
+                .sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time))
+                .slice(0, 5)
+                .map(r => (
+                  <TouchableOpacity key={r.id} onPress={() => setSelected(r.date)}
+                    style={[styles.upcomingItem, { backgroundColor: c.card, borderColor: c.border }]}>
+                    <View style={[styles.upcomingDot, { backgroundColor: CN.blue }]} />
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.upcomingItemTitle, { color: c.text }]}>{r.title}</Text>
+                      <Text style={[styles.upcomingItemDate, { color: c.label }]}>{r.date} at {r.time}</Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={16} color={c.label} />
+                  </TouchableOpacity>
+                ))
+              }
+            </View>
+          )}
+        </ScrollView>
+      )}
 
       <ReminderModal
         visible={modalVisible}
@@ -502,5 +581,4 @@ const styles = StyleSheet.create({
   saveBtnText:{ color: '#fff', fontSize: 14, fontWeight: '700' },
   errorBadge: { backgroundColor: '#F5E6E6', borderLeftWidth: 4, borderLeftColor: CN.red, borderRadius: 8, padding: 12 },
   errorText:  { color: CN.red, fontSize: 13, fontWeight: '600' },
-
 }) as unknown as Record<string, any>;

@@ -1,4 +1,5 @@
-import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { useEffect, useState } from 'react';
+import { ActivityIndicator, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -6,7 +7,8 @@ import { StatusBar } from 'expo-status-bar';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { useAuth } from '@/context/AuthContext';
-import { CN, USERS } from '@/data/static';
+import { CN } from '@/data/static';
+import { getAdminStats, type AdminStats } from '@/api/admin';
 
 function greeting(): string {
   const h = new Date().getHours();
@@ -15,8 +17,8 @@ function greeting(): string {
   return 'Good evening';
 }
 
-function StatCard({ icon, value, label, color, isDark }: {
-  icon: string; value: string | number; label: string; color: string; isDark: boolean;
+function StatCard({ icon, value, label, color, isDark, loading }: {
+  icon: string; value: string | number; label: string; color: string; isDark: boolean; loading?: boolean;
 }) {
   const c = isDark ? CN.dark : CN.light;
   return (
@@ -24,7 +26,10 @@ function StatCard({ icon, value, label, color, isDark }: {
       <View style={[styles.statIcon, { backgroundColor: color + '18' }]}>
         <Ionicons name={icon as any} size={22} color={color} />
       </View>
-      <Text style={[styles.statValue, { color: c.text }]}>{value}</Text>
+      {loading
+        ? <ActivityIndicator color={color} size="small" />
+        : <Text style={[styles.statValue, { color: c.text }]}>{value}</Text>
+      }
       <Text style={[styles.statLabel, { color: c.label }]}>{label}</Text>
     </View>
   );
@@ -60,9 +65,19 @@ export default function AdminDashboard() {
   const c = isDark ? CN.dark : CN.light;
   const insets = useSafeAreaInsets();
 
-  const displayName = user?.display_name || user?.full_name || 'Admin';
-  const totalUsers  = USERS.length;
-  const activeUsers = USERS.filter(u => u.is_online).length;
+  const [stats, setStats]       = useState<AdminStats | null>(null);
+  const [loadingStats, setLoadingStats] = useState(true);
+
+  useEffect(() => {
+    getAdminStats()
+      .then(setStats)
+      .catch(() => {})
+      .finally(() => setLoadingStats(false));
+  }, []);
+
+  const displayName  = user?.display_name || user?.full_name || 'Admin';
+  const totalUsers   = stats?.total_users  ?? 0;
+  const onlineUsers  = stats?.online_users ?? 0;
   const headerHeight = 120 + insets.top;
 
   return (
@@ -72,7 +87,6 @@ export default function AdminDashboard() {
       {/* Gradient header */}
       <View style={[styles.header, { minHeight: headerHeight, overflow: 'hidden' }]}>
         <View style={[StyleSheet.absoluteFillObject, { backgroundColor: CN.charcoal }]} />
-        {/* Grid pattern overlay */}
         <View style={[StyleSheet.absoluteFillObject, { opacity: 0.06 }]}>
           {Array.from({ length: 8 }).map((_, i) => (
             <View key={i} style={{ height: 1, backgroundColor: '#fff', marginTop: 14 }} />
@@ -87,7 +101,7 @@ export default function AdminDashboard() {
           <TouchableOpacity onPress={() => router.back()} style={styles.backBtn}>
             <Ionicons name="arrow-back" size={22} color="#fff" />
           </TouchableOpacity>
-          <View style={[styles.adminBadge]}>
+          <View style={styles.adminBadge}>
             <Ionicons name="shield-checkmark" size={14} color={CN.red} />
             <Text style={styles.adminBadgeText}>Admin</Text>
           </View>
@@ -102,9 +116,42 @@ export default function AdminDashboard() {
 
       {/* Stats */}
       <View style={styles.statsRow}>
-        <StatCard icon="people" value={totalUsers}  label="Total Employees" color={CN.blue} isDark={isDark} />
-        <StatCard icon="wifi"   value={activeUsers} label="Active Users"    color={CN.online} isDark={isDark} />
+        <StatCard
+          icon="people"
+          value={totalUsers}
+          label="Total Employees"
+          color={CN.blue}
+          isDark={isDark}
+          loading={loadingStats}
+        />
+        <StatCard
+          icon="wifi"
+          value={onlineUsers}
+          label="Online Now"
+          color={CN.online}
+          isDark={isDark}
+          loading={loadingStats}
+        />
       </View>
+
+      {stats && (
+        <View style={styles.statsRow}>
+          <StatCard
+            icon="chatbubbles-outline"
+            value={stats.messages_today}
+            label="Messages Today"
+            color={CN.purple}
+            isDark={isDark}
+          />
+          <StatCard
+            icon="call-outline"
+            value={stats.calls_today}
+            label="Calls Today"
+            color={CN.red}
+            isDark={isDark}
+          />
+        </View>
+      )}
 
       {/* Navigation cards */}
       <View style={styles.section}>
@@ -113,7 +160,7 @@ export default function AdminDashboard() {
         <NavCard
           icon="people-outline"
           title="Manage Users"
-          subtitle={`${totalUsers} employees registered`}
+          subtitle={loadingStats ? 'Loading…' : `${totalUsers} employees registered`}
           onPress={() => router.push('/admin/users')}
           isDark={isDark}
         />
@@ -149,13 +196,13 @@ const styles = StyleSheet.create({
   greetingName: { color: '#fff', fontSize: 22, fontWeight: '900', letterSpacing: -0.5, marginTop: 2 },
   greetingSub:  { color: 'rgba(255,255,255,0.65)', fontSize: 13, marginTop: 4 },
 
-  statsRow: { flexDirection: 'row', gap: 12, paddingHorizontal: 16, marginTop: -16 },
+  statsRow: { flexDirection: 'row', gap: 12, paddingHorizontal: 16, marginTop: -16, marginBottom: 4 },
   statCard: { flex: 1, borderRadius: 16, borderWidth: 1, padding: 16, alignItems: 'center', gap: 8, shadowColor: '#000', shadowOpacity: 0.06, shadowRadius: 8, shadowOffset: { width: 0, height: 2 }, elevation: 3 },
   statIcon: { width: 44, height: 44, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   statValue:{ fontSize: 28, fontWeight: '900', letterSpacing: -1 },
   statLabel:{ fontSize: 11, fontWeight: '600', textAlign: 'center' },
 
-  section:       { paddingHorizontal: 16, marginTop: 24 },
+  section:       { paddingHorizontal: 16, marginTop: 16 },
   sectionTitle:  { fontSize: 10, fontWeight: '900', letterSpacing: 1.5, textTransform: 'uppercase', marginBottom: 10 },
   navCard:       { flexDirection: 'row', alignItems: 'center', gap: 12, borderRadius: 12, borderWidth: 1, padding: 14, marginBottom: 8 },
   navIcon:       { width: 40, height: 40, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },

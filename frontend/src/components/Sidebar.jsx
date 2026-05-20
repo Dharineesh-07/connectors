@@ -105,6 +105,7 @@ function ConversationComposer({
   onClose,
   onStartDirect,
   onCreateGroup,
+  onlineUsers,
 }) {
   const isGroup = mode === 'group'
   const { user: currentUser } = useAuth()
@@ -237,7 +238,7 @@ function ConversationComposer({
                     selected ? 'bg-cn-blue-light' : 'hover:bg-cn-gray-100'
                   }`}
                 >
-                  <UserAvatar user={u} size="sm" online={u.is_online} />
+                  <UserAvatar user={u} size="sm" online={onlineUsers?.has(u.id) ?? u.is_online} />
                   <div className="min-w-0 flex-1">
                     <p className="text-sm font-semibold text-cn-charcoal truncate">
                       {u.display_name || u.full_name}
@@ -307,7 +308,7 @@ export default function Sidebar({ isOpen, onClose }) {
   const [showAdminModal, setShowAdminModal] = useState(false)
   const initialOnlineIds = useMemo(
     () =>
-      conversations.flatMap((conv) =>
+      (conversations ?? []).flatMap((conv) =>
         conv.members
           ?.filter((member) => member.user?.is_online)
           .map((member) => member.user_id) ?? []
@@ -319,7 +320,7 @@ export default function Sidebar({ isOpen, onClose }) {
   const themeLabel = theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'
 
   const loadConversations = useCallback(() => {
-    return listConversations().then(setConversations).catch(() => {})
+    return listConversations().then((data) => setConversations(data ?? [])).catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -412,7 +413,7 @@ export default function Sidebar({ isOpen, onClose }) {
     return () => window.removeEventListener('focus', clearUnread)
   }, [conversationId])
 
-  const filtered = conversations.filter((c) => {
+  const filtered = (conversations ?? []).filter((c) => {
     if (!search) return true
     const isDirect = c.type === 'direct'
     const other = isDirect ? c.members?.find((m) => m.user_id !== user?.id) : null
@@ -680,6 +681,7 @@ export default function Sidebar({ isOpen, onClose }) {
         onClose={closeComposer}
         onStartDirect={handleStartDirect}
         onCreateGroup={handleCreateGroup}
+        onlineUsers={onlineUsers}
       />
     )}
     {showProfileModal && (
