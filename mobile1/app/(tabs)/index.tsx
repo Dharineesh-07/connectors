@@ -1,5 +1,6 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
   Alert,
   FlatList,
   Modal,
@@ -17,10 +18,15 @@ import { StatusBar } from 'expo-status-bar';
 
 import { useAuth } from '@/context/AuthContext';
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import { CN, getInitials, formatTime, type Conversation, type UserItem } from '@/data/static';
 import {
-  CN, USERS, INITIAL_CONVERSATIONS, getInitials, formatTime,
-  type Conversation, type UserItem,
-} from '@/data/static';
+  listConversations,
+  createConversation,
+  listUsers,
+  type UserItem as ApiUser,
+  type Conversation as ApiConv,
+} from '@/api/conversations';
+import { wsClient } from '@/api/websocket';
 
 // ── Avatar ────────────────────────────────────────────────────────────────────
 function Avatar({ name, size = 44, online = false, isGroup = false }: {
@@ -51,7 +57,7 @@ function Avatar({ name, size = 44, online = false, isGroup = false }: {
 
 // ── ConvItem ──────────────────────────────────────────────────────────────────
 function ConvItem({ conv, currentUserId, onPress, isDark }: {
-  conv: Conversation; currentUserId?: number; onPress: () => void; isDark: boolean;
+  conv: ApiConv; currentUserId?: string; onPress: () => void; isDark: boolean;
 }) {
   const c = isDark ? CN.dark : CN.light;
   const isGroup = conv.type === 'group';
@@ -59,7 +65,7 @@ function ConvItem({ conv, currentUserId, onPress, isDark }: {
   const name = isGroup ? conv.name : (other?.user?.display_name || other?.user?.full_name || 'You');
   const lastMsg = conv.last_message;
   const preview = lastMsg
-    ? (lastMsg.type !== 'text' ? `[${lastMsg.type}]` : (lastMsg.content?.slice(0, 60) ?? ''))
+    ? (lastMsg.type !== 'text' ? `[${lastMsg.type}]` : ((lastMsg.content ?? '').slice(0, 60)))
     : 'No messages yet';
   const isOnline = !isGroup && !!other?.user?.is_online;
   const unread = conv.unread_count ?? 0;
@@ -94,17 +100,25 @@ function ConvItem({ conv, currentUserId, onPress, isDark }: {
 // ── ComposerModal ─────────────────────────────────────────────────────────────
 function ComposerModal({ mode, visible, onClose, currentUser, onCreated, isDark }: {
   mode: 'direct' | 'group'; visible: boolean; onClose: () => void;
-  currentUser?: UserItem; onCreated: (conv: Conversation) => void; isDark: boolean;
+  currentUser?: UserItem; onCreated: (conv: ApiConv) => void; isDark: boolean;
 }) {
   const c = isDark ? CN.dark : CN.light;
   const isGroup = mode === 'group';
 
-  const [search, setSearch]         = useState('');
-  const [groupName, setGroupName]   = useState('');
-  const [selectedIds, setSelectedIds] = useState<number[]>([]);
-  const [error, setError]           = useState('');
+  const [search, setSearch]           = useState('');
+  const [groupName, setGroupName]     = useState('');
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [users, setUsers]             = useState<ApiUser[]>([]);
+  const [error, setError]             = useState('');
+  const [creating, setCreating]       = useState(false);
 
-  const otherUsers = USERS.filter((u) => u.id !== currentUser?.id);
+  // Load user directory when modal opens.
+  useEffect(() => {
+    if (!visible) return;
+    listUsers().then(setUsers).catch(() => {});
+  }, [visible]);
+
+  const otherUsers = users.filter((u) => u.id !== currentUser?.id);
 
   const filteredUsers = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -116,34 +130,37 @@ function ComposerModal({ mode, visible, onClose, currentUser, onCreated, isDark 
   }, [search, otherUsers]);
 
   const selectedUsers = otherUsers.filter((u) => selectedIds.includes(u.id));
-  const toggleSelected = (id: number) =>
+  const toggleSelected = (id: string) =>
     setSelectedIds((prev) => prev.includes(id) ? prev.filter((i) => i !== id) : [...prev, id]);
 
-  const handleStartDirect = (u: UserItem) => {
-    const newConv: Conversation = {
-      id: `conv_${Date.now()}`,
-      type: 'direct',
-      members: [
-        { user_id: currentUser!.id, user: currentUser! },
-        { user_id: u.id, user: u },
-      ],
-      unread_count: 0,
-    };
-    onCreated(newConv);
+  const handleStartDirect = async (u: ApiUser) => {
+    setCreating(true);
+    try {
+      const conv = await createConversation({ type: 'direct', user_ids: [u.id] });
+      onCreated(conv);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Failed to start chat');
+    } finally {
+      setCreating(false);
+    }
   };
 
-  const handleCreateGroup = () => {
+  const handleCreateGroup = async () => {
     if (!groupName.trim()) { setError('Group name is required'); return; }
     if (selectedIds.length < 2) { setError('Select at least 2 members'); return; }
-    const allIds = [...new Set([...selectedIds, ...(currentUser ? [currentUser.id] : [])])];
-    const newConv: Conversation = {
-      id: `conv_${Date.now()}`,
-      type: 'group',
-      name: groupName.trim(),
-      members: USERS.filter(u => allIds.includes(u.id)).map(u => ({ user_id: u.id, user: u })),
-      unread_count: 0,
-    };
-    onCreated(newConv);
+    setCreating(true);
+    try {
+      const conv = await createConversation({
+        type: 'group',
+        name: groupName.trim(),
+        user_ids: selectedIds,
+      });
+      onCreated(conv);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Failed to create group');
+    } finally {
+      setCreating(false);
+    }
   };
 
   const handleClose = () => {
@@ -197,7 +214,7 @@ function ComposerModal({ mode, visible, onClose, currentUser, onCreated, isDark 
                 {selectedUsers.map((u) => (
                   <TouchableOpacity key={u.id} onPress={() => toggleSelected(u.id)}
                     style={[styles.chip, { backgroundColor: CN.blueLight }]}>
-                    <Text style={[styles.chipText, { color: CN.blue }]}>{u.display_name}</Text>
+                    <Text style={[styles.chipText, { color: CN.blue }]}>{u.display_name || u.full_name}</Text>
                   </TouchableOpacity>
                 ))}
               </View>
@@ -217,22 +234,23 @@ function ComposerModal({ mode, visible, onClose, currentUser, onCreated, isDark 
 
           <FlatList
             data={filteredUsers}
-            keyExtractor={(u) => String(u.id)}
+            keyExtractor={(u) => u.id}
             style={[styles.userList, { borderTopColor: c.border, borderBottomColor: c.border }]}
             renderItem={({ item }) => {
               const selected = selectedIds.includes(item.id);
               return (
                 <TouchableOpacity
                   onPress={() => isGroup ? toggleSelected(item.id) : handleStartDirect(item)}
+                  disabled={creating}
                   style={[styles.userItem, { backgroundColor: selected ? CN.blueLight : 'transparent' }]}
                 >
-                  <Avatar name={item.display_name} size={36} online={item.is_online} />
+                  <Avatar name={item.display_name || item.full_name} size={36} online={item.is_online} />
                   <View style={{ flex: 1, marginLeft: 10 }}>
                     <Text style={{ fontWeight: '600', fontSize: 14, color: c.text }} numberOfLines={1}>
-                      {item.display_name}
+                      {item.display_name || item.full_name}
                     </Text>
                     <Text style={{ fontSize: 12, color: c.label }} numberOfLines={1}>
-                      {item.department}
+                      {item.department ?? item.email}
                     </Text>
                   </View>
                   {isGroup && (
@@ -246,7 +264,9 @@ function ComposerModal({ mode, visible, onClose, currentUser, onCreated, isDark 
             }}
             ListEmptyComponent={
               <View style={styles.listPlaceholder}>
-                <Text style={{ color: c.label, fontSize: 13 }}>No people found.</Text>
+                <Text style={{ color: c.label, fontSize: 13 }}>
+                  {users.length === 0 ? 'Loading…' : 'No people found.'}
+                </Text>
               </View>
             }
           />
@@ -256,10 +276,13 @@ function ComposerModal({ mode, visible, onClose, currentUser, onCreated, isDark 
               <Text style={{ color: c.label, fontSize: 12 }}>{selectedIds.length} selected</Text>
               <TouchableOpacity
                 onPress={handleCreateGroup}
-                disabled={selectedIds.length < 2 || !groupName.trim()}
-                style={[styles.createBtn, { opacity: selectedIds.length < 2 || !groupName.trim() ? 0.45 : 1 }]}
+                disabled={selectedIds.length < 2 || !groupName.trim() || creating}
+                style={[styles.createBtn, { opacity: selectedIds.length < 2 || !groupName.trim() || creating ? 0.45 : 1 }]}
               >
-                <Text style={{ color: '#fff', fontWeight: '700', fontSize: 14 }}>Create Group</Text>
+                {creating
+                  ? <ActivityIndicator color="#fff" size="small" />
+                  : <Text style={{ color: '#fff', fontWeight: '700', fontSize: 14 }}>Create Group</Text>
+                }
               </TouchableOpacity>
             </View>
           )}
@@ -278,14 +301,43 @@ export default function HomeScreen() {
   const c = isDark ? CN.dark : CN.light;
   const insets = useSafeAreaInsets();
 
-  const userConversations = INITIAL_CONVERSATIONS.filter(conv =>
-    conv.members.some(m => m.user_id === user?.id)
-  );
-
-  const [conversations, setConversations] = useState<Conversation[]>(userConversations);
+  const [conversations, setConversations] = useState<ApiConv[]>([]);
+  const [loading, setLoading]             = useState(true);
   const [search, setSearch]               = useState('');
   const [showSearch, setShowSearch]       = useState(false);
   const [composerMode, setComposerMode]   = useState<'direct' | 'group' | null>(null);
+
+  // Track online status overrides received from WS presence events.
+  const [onlineMap, setOnlineMap] = useState<Record<string, boolean>>({});
+
+  const fetchConversations = useCallback(async () => {
+    try {
+      const data = await listConversations();
+      setConversations(data);
+    } catch {}
+  }, []);
+
+  // Initial load.
+  useEffect(() => {
+    fetchConversations().finally(() => setLoading(false));
+  }, [fetchConversations]);
+
+  // WS: refresh conv list on new message and update online status on presence events.
+  useEffect(() => {
+    const offMsg = wsClient.on('message:new', () => {
+      fetchConversations();
+    });
+
+    const handlePresence = (data: unknown) => {
+      const d = data as { user_id: string; online: boolean };
+      if (d?.user_id) setOnlineMap(prev => ({ ...prev, [d.user_id]: d.online }));
+    };
+    const offOnline  = wsClient.on('user:online',   handlePresence);
+    const offOffline = wsClient.on('user:offline',  handlePresence);
+    const offPres    = wsClient.on('user:presence', handlePresence);
+
+    return () => { offMsg(); offOnline(); offOffline(); offPres(); };
+  }, [fetchConversations]);
 
   const filtered = conversations.filter((conv) => {
     if (!search) return true;
@@ -295,7 +347,19 @@ export default function HomeScreen() {
     return name?.toLowerCase().includes(search.toLowerCase());
   });
 
-  const handleConvCreated = useCallback((conv: Conversation) => {
+  // Merge WS online status into conversation member data for display.
+  const enrichedConvs = filtered.map(conv => ({
+    ...conv,
+    members: conv.members?.map(m => ({
+      ...m,
+      user: {
+        ...m.user,
+        is_online: onlineMap[m.user_id] ?? m.user.is_online,
+      },
+    })),
+  }));
+
+  const handleConvCreated = useCallback((conv: ApiConv) => {
     setComposerMode(null);
     setConversations((prev) => {
       if (prev.some((c) => c.id === conv.id)) return prev;
@@ -379,29 +443,35 @@ export default function HomeScreen() {
       </View>
 
       {/* Conversation list */}
-      <FlatList
-        data={filtered}
-        keyExtractor={(conv) => conv.id}
-        style={{ flex: 1, backgroundColor: c.card }}
-        renderItem={({ item }) => (
-          <ConvItem
-            conv={item}
-            currentUserId={user?.id}
-            onPress={() => router.push(`/chat/${item.id}`)}
-            isDark={isDark}
-          />
-        )}
-        ListEmptyComponent={
-          <View style={styles.emptyState}>
-            <View style={styles.emptyBubble}>
-              <Text style={{ fontSize: 28 }}>💬</Text>
+      {loading ? (
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+          <ActivityIndicator color={CN.red} />
+        </View>
+      ) : (
+        <FlatList
+          data={enrichedConvs}
+          keyExtractor={(conv) => conv.id}
+          style={{ flex: 1, backgroundColor: c.card }}
+          renderItem={({ item }) => (
+            <ConvItem
+              conv={item}
+              currentUserId={user?.id}
+              onPress={() => router.push(`/chat/${item.id}`)}
+              isDark={isDark}
+            />
+          )}
+          ListEmptyComponent={
+            <View style={styles.emptyState}>
+              <View style={styles.emptyBubble}>
+                <Text style={{ fontSize: 28 }}>💬</Text>
+              </View>
+              <Text style={[styles.emptyText, { color: c.label }]}>
+                {search ? 'No conversations match your search' : 'No conversations yet'}
+              </Text>
             </View>
-            <Text style={[styles.emptyText, { color: c.label }]}>
-              {search ? 'No conversations match your search' : 'No conversations yet'}
-            </Text>
-          </View>
-        }
-      />
+          }
+        />
+      )}
 
       {/* Quick tools row */}
       <View style={[styles.quickTools, { backgroundColor: c.gray100, borderTopColor: c.border }]}>
@@ -514,5 +584,4 @@ const styles = StyleSheet.create({
   createBtn:   { backgroundColor: CN.red, borderRadius: 20, paddingHorizontal: 20, paddingVertical: 10 },
   errorBadge:  { backgroundColor: '#F5E6E6', borderLeftWidth: 4, borderLeftColor: CN.red, borderRadius: 8, padding: 12 },
   errorText:   { color: CN.red, fontSize: 13, fontWeight: '600' },
-
 }) as unknown as Record<string, any>;

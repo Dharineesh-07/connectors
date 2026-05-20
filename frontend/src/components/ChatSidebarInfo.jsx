@@ -196,10 +196,10 @@ export default function ChatSidebarInfo({ conversationId, conversation, onClose 
                   {data?.files?.map((msg) => (
                     <a
                       key={msg.id}
-                      href={msg.file_url}
-                      target="_blank"
+                      href={msg.file_url || undefined}
+                      target={msg.file_url ? '_blank' : undefined}
                       rel="noreferrer"
-                      className="flex items-center gap-4 p-4 rounded-2xl border border-cn-gray-100 bg-cn-white hover:bg-cn-blue-light/30 hover:border-cn-blue/20 hover:shadow-lg hover:shadow-cn-blue/5 transition-all duration-300 group"
+                      className={`flex items-center gap-4 p-4 rounded-2xl border border-cn-gray-100 bg-cn-white transition-all duration-300 group ${msg.file_url ? 'hover:bg-cn-blue-light/30 hover:border-cn-blue/20 hover:shadow-lg hover:shadow-cn-blue/5 cursor-pointer' : 'opacity-60 cursor-default'}`}
                     >
                       <div className="w-12 h-12 rounded-xl bg-cn-blue-light flex items-center justify-center flex-shrink-0 group-hover:scale-110 transition-transform">
                         <DocumentIcon className="w-6 h-6 text-cn-blue" />

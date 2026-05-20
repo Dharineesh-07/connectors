@@ -1,37 +1,27 @@
-# Run with: docker compose --env-file ./backend/.env up -d
-# Copy backend/.env.example to backend/.env and fill in values before first run.
+# Run with: docker compose --env-file ./backend-go/.env up -d
+# Copy backend-go/.env.example to backend-go/.env and fill in values before first run.
 
 networks:
   orgchat-net:
     driver: bridge
 
 services:
-  mysql:
-    image: mysql:8.0
+  postgres:
+    image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
-      MYSQL_DATABASE: orgchat
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rootpassword}
+      POSTGRES_DB: orgchat
     volumes:
-      - mysql_data:/var/lib/mysql
+      - postgres_data:/var/lib/postgresql/data
     ports:
-      - "3306:3306"
+      - "5432:5432"
     healthcheck:
-      test:
-        [
-          "CMD",
-          "mysqladmin",
-          "ping",
-          "-h",
-          "localhost",
-          "-u",
-          "root",
-          "--password=${MYSQL_ROOT_PASSWORD:-rootpassword}",
-        ]
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
       timeout: 5s
       retries: 6
-      start_period: 40s
+      start_period: 20s
     networks:
       - orgchat-net
 
@@ -53,41 +43,39 @@ services:
 
   backend:
     build:
-      context: ./backend
+      context: ./backend-go
       dockerfile: Dockerfile
     restart: unless-stopped
     environment:
-      DATABASE_URL: mysql+aiomysql://root:${MYSQL_ROOT_PASSWORD:-rootpassword}@mysql:3306/orgchat
+      DATABASE_URL: host=postgres port=5432 user=postgres password=${POSTGRES_PASSWORD:-rootpassword} dbname=orgchat sslmode=disable TimeZone=UTC
       REDIS_URL: redis://redis:6379
       SECRET_KEY: ${SECRET_KEY:-change-this-in-production}
-      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-15}
-      REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS:-7}
       COMPANY_EMAIL_DOMAIN: ${COMPANY_EMAIL_DOMAIN:-cnc.com}
       MAX_FILE_SIZE_MB: ${MAX_FILE_SIZE_MB:-10}
+      UPLOADS_DIR: /app/uploads
       S3_BUCKET: ${S3_BUCKET:-}
-      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-}
-      S3_SECRET_KEY: ${S3_SECRET_KEY:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       S3_REGION: ${S3_REGION:-us-east-1}
       TURN_SERVER_URL: ${TURN_SERVER_URL:-}
       TURN_USERNAME: ${TURN_USERNAME:-}
       TURN_CREDENTIAL: ${TURN_CREDENTIAL:-}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost,http://localhost:8081,http://localhost:19006,http://192.168.0.161:8081}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost,http://localhost:8081,http://localhost:19006,http://192.168.0.161:8081,http://192.168.29.4,http://192.168.29.4:80,http://192.168.29.4:5173,http://192.168.29.4:8081,http://192.168.29.4:19006}
     volumes:
-      - ./backend:/app
       - uploads_data:/app/uploads
     ports:
       - "8001:8000"
     depends_on:
-      mysql:
+      postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/health || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 4
-      start_period: 30s
+      start_period: 20s
     networks:
       - orgchat-net
 
@@ -112,6 +100,6 @@ services:
       - orgchat-net
 
 volumes:
-  mysql_data:
+  postgres_data:
   redis_data:
   uploads_data:

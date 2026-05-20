@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
+  ActivityIndicator,
   Alert,
   FlatList,
   Modal,
@@ -16,9 +17,16 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
-import { CN, USERS, getInitials, type UserItem } from '@/data/static';
+import { CN, getInitials } from '@/data/static';
+import {
+  listAdminUsers,
+  createAdminUser,
+  deactivateUser,
+  resetUserPassword,
+  type AdminUser,
+} from '@/api/admin';
 
-const PAGE_SIZE = 10;
+const PAGE_SIZE = 20;
 
 // ── Avatar ────────────────────────────────────────────────────────────────────
 function UserAvatar({ name, size = 38 }: { name: string; size?: number }) {
@@ -32,27 +40,32 @@ function UserAvatar({ name, size = 38 }: { name: string; size?: number }) {
 // ── AddUserModal ──────────────────────────────────────────────────────────────
 function AddUserModal({ visible, onClose, onAdd, isDark }: {
   visible: boolean; onClose: () => void;
-  onAdd: (u: UserItem) => void; isDark: boolean;
+  onAdd: (u: AdminUser) => void; isDark: boolean;
 }) {
   const c = isDark ? CN.dark : CN.light;
-  const [fullName, setFullName]       = useState('');
-  const [email, setEmail]             = useState('');
-  const [department, setDepartment]   = useState('');
-  const [error, setError]             = useState('');
+  const [fullName, setFullName]     = useState('');
+  const [email, setEmail]           = useState('');
+  const [department, setDepartment] = useState('');
+  const [error, setError]           = useState('');
+  const [saving, setSaving]         = useState(false);
 
-  const handleAdd = () => {
+  const handleAdd = async () => {
     if (!fullName.trim() || !email.trim()) { setError('Full name and email are required.'); return; }
-    onAdd({
-      id: Date.now(),
-      full_name: fullName.trim(),
-      display_name: fullName.trim().split(' ')[0],
-      email: email.trim().toLowerCase(),
-      role: 'user',
-      department: department.trim() || 'General',
-      is_online: false,
-      is_active: true,
-    });
-    setFullName(''); setEmail(''); setDepartment(''); setError('');
+    setSaving(true);
+    setError('');
+    try {
+      const user = await createAdminUser({
+        full_name:  fullName.trim(),
+        email:      email.trim().toLowerCase(),
+        department: department.trim() || undefined,
+      });
+      onAdd(user);
+      setFullName(''); setEmail(''); setDepartment('');
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Failed to create user');
+    } finally {
+      setSaving(false);
+    }
   };
 
   const handleClose = () => {
@@ -75,7 +88,9 @@ function AddUserModal({ visible, onClose, onAdd, isDark }: {
               <Text style={[styles.modalTitle, { color: c.text }]}>Add Employee</Text>
               <Text style={[styles.modalSub, { color: c.label }]}>Create a new user account</Text>
             </View>
-            <TouchableOpacity onPress={handleClose}><Ionicons name="close" size={20} color={c.label} /></TouchableOpacity>
+            <TouchableOpacity onPress={handleClose}>
+              <Ionicons name="close" size={20} color={c.label} />
+            </TouchableOpacity>
           </View>
           {!!error && (
             <View style={[styles.errorBadge, { margin: 14 }]}>
@@ -85,8 +100,8 @@ function AddUserModal({ visible, onClose, onAdd, isDark }: {
           <View style={styles.modalBody}>
             {[
               { label: 'Full Name *', value: fullName, setter: setFullName, placeholder: 'John Doe', type: 'default' as const },
-              { label: 'Email *',    value: email,    setter: setEmail,    placeholder: 'john@company.com', type: 'email-address' as const },
-              { label: 'Department', value: department, setter: setDepartment, placeholder: 'Engineering', type: 'default' as const },
+              { label: 'Email *',     value: email,    setter: setEmail,    placeholder: 'john@company.com', type: 'email-address' as const },
+              { label: 'Department',  value: department, setter: setDepartment, placeholder: 'Engineering', type: 'default' as const },
             ].map(({ label, value, setter, placeholder, type }) => (
               <View key={label} style={styles.fieldGroup}>
                 <Text style={[styles.fieldLabel, { color: c.label }]}>{label}</Text>
@@ -107,8 +122,94 @@ function AddUserModal({ visible, onClose, onAdd, isDark }: {
               style={[styles.footerBtn, { borderColor: c.border }]}>
               <Text style={[styles.footerBtnText, { color: c.label }]}>Cancel</Text>
             </TouchableOpacity>
-            <TouchableOpacity onPress={handleAdd} style={[styles.footerBtn, styles.addBtn]}>
-              <Text style={styles.addBtnText}>Add Employee</Text>
+            <TouchableOpacity onPress={handleAdd} disabled={saving}
+              style={[styles.footerBtn, styles.addBtn, { opacity: saving ? 0.6 : 1 }]}>
+              {saving
+                ? <ActivityIndicator color="#fff" size="small" />
+                : <Text style={styles.addBtnText}>Add Employee</Text>
+              }
+            </TouchableOpacity>
+          </View>
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
+// ── ResetPasswordModal ────────────────────────────────────────────────────────
+function ResetPasswordModal({ userId, userName, visible, onClose, isDark }: {
+  userId: string; userName: string; visible: boolean; onClose: () => void; isDark: boolean;
+}) {
+  const c = isDark ? CN.dark : CN.light;
+  const [password, setPassword] = useState('');
+  const [error, setError]       = useState('');
+  const [saving, setSaving]     = useState(false);
+
+  const handleReset = async () => {
+    if (password.length < 8) { setError('Password must be at least 8 characters.'); return; }
+    setSaving(true); setError('');
+    try {
+      await resetUserPassword(userId, password);
+      setPassword('');
+      onClose();
+      Alert.alert('Done', `Password reset for ${userName}.`);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Failed to reset password');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleClose = () => { setPassword(''); setError(''); onClose(); };
+
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={handleClose}>
+      <Pressable style={styles.overlay} onPress={handleClose}>
+        <Pressable style={[styles.modalCard, { backgroundColor: c.card, borderColor: c.border }]}
+          onPress={(e) => e.stopPropagation()}>
+          <View style={styles.accentBar}>
+            <View style={[styles.accentSlice, { backgroundColor: CN.red }]} />
+            <View style={[styles.accentSlice, { backgroundColor: CN.purple }]} />
+            <View style={[styles.accentSlice, { backgroundColor: CN.blue }]} />
+          </View>
+          <View style={[styles.modalHeader, { borderBottomColor: c.border }]}>
+            <View>
+              <Text style={[styles.modalTitle, { color: c.text }]}>Reset Password</Text>
+              <Text style={[styles.modalSub, { color: c.label }]}>{userName}</Text>
+            </View>
+            <TouchableOpacity onPress={handleClose}>
+              <Ionicons name="close" size={20} color={c.label} />
+            </TouchableOpacity>
+          </View>
+          {!!error && (
+            <View style={[styles.errorBadge, { margin: 14 }]}>
+              <Text style={styles.errorText}>{error}</Text>
+            </View>
+          )}
+          <View style={styles.modalBody}>
+            <View style={styles.fieldGroup}>
+              <Text style={[styles.fieldLabel, { color: c.label }]}>New Password</Text>
+              <TextInput
+                style={[styles.input, { backgroundColor: c.inputBg, borderColor: c.border, color: c.text }]}
+                placeholder="Min 8 characters"
+                placeholderTextColor={c.label}
+                value={password}
+                onChangeText={setPassword}
+                secureTextEntry
+                autoFocus
+              />
+            </View>
+          </View>
+          <View style={[styles.modalFooter, { borderTopColor: c.border }]}>
+            <TouchableOpacity onPress={handleClose} style={[styles.footerBtn, { borderColor: c.border }]}>
+              <Text style={[styles.footerBtnText, { color: c.label }]}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={handleReset} disabled={saving}
+              style={[styles.footerBtn, styles.addBtn, { opacity: saving ? 0.6 : 1 }]}>
+              {saving
+                ? <ActivityIndicator color="#fff" size="small" />
+                : <Text style={styles.addBtnText}>Reset</Text>
+              }
             </TouchableOpacity>
           </View>
         </Pressable>
@@ -119,14 +220,15 @@ function AddUserModal({ visible, onClose, onAdd, isDark }: {
 
 // ── UserRow ───────────────────────────────────────────────────────────────────
 function UserRow({ user, onDeactivate, onReset, isDark }: {
-  user: UserItem; onDeactivate: () => void; onReset: () => void; isDark: boolean;
+  user: AdminUser; onDeactivate: () => void; onReset: () => void; isDark: boolean;
 }) {
   const c = isDark ? CN.dark : CN.light;
+  const displayName = user.display_name || user.full_name;
   return (
     <View style={[styles.userRow, { backgroundColor: c.card, borderBottomColor: c.border }]}>
       <View style={styles.userLeft}>
         <View style={{ position: 'relative' }}>
-          <UserAvatar name={user.display_name} size={40} />
+          <UserAvatar name={displayName} size={40} />
           {user.is_online && (
             <View style={{ position: 'absolute', bottom: 0, right: 0, width: 10, height: 10,
               borderRadius: 5, backgroundColor: CN.online, borderWidth: 2, borderColor: '#fff' }} />
@@ -142,7 +244,9 @@ function UserRow({ user, onDeactivate, onReset, isDark }: {
             )}
           </View>
           <Text style={[styles.userEmail, { color: c.label }]} numberOfLines={1}>{user.email}</Text>
-          <Text style={[styles.userDept, { color: c.sub }]}>{user.department}</Text>
+          {!!user.department && (
+            <Text style={[styles.userDept, { color: c.sub }]}>{user.department}</Text>
+          )}
         </View>
       </View>
       <View style={styles.userActions}>
@@ -151,9 +255,11 @@ function UserRow({ user, onDeactivate, onReset, isDark }: {
             {user.is_active ? 'Active' : 'Inactive'}
           </Text>
         </View>
-        <TouchableOpacity onPress={onDeactivate} style={[styles.actionBtn, { backgroundColor: c.gray100 }]}>
-          <Ionicons name="person-remove-outline" size={14} color={c.label} />
-        </TouchableOpacity>
+        {user.is_active && (
+          <TouchableOpacity onPress={onDeactivate} style={[styles.actionBtn, { backgroundColor: c.gray100 }]}>
+            <Ionicons name="person-remove-outline" size={14} color={c.label} />
+          </TouchableOpacity>
+        )}
         <TouchableOpacity onPress={onReset} style={[styles.actionBtn, { backgroundColor: c.gray100 }]}>
           <Ionicons name="key-outline" size={14} color={c.label} />
         </TouchableOpacity>
@@ -170,35 +276,53 @@ export default function ManageUsersScreen() {
   const c = isDark ? CN.dark : CN.light;
   const insets = useSafeAreaInsets();
 
-  const [users, setUsers]             = useState<UserItem[]>([...USERS]);
-  const [page, setPage]               = useState(0);
+  const [users, setUsers]         = useState<AdminUser[]>([]);
+  const [total, setTotal]         = useState(0);
+  const [page, setPage]           = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [loading, setLoading]     = useState(true);
   const [showAddModal, setShowAddModal] = useState(false);
+  const [resetTarget, setResetTarget]   = useState<AdminUser | null>(null);
 
-  const totalPages = Math.ceil(users.length / PAGE_SIZE);
-  const pageUsers  = users.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+  const loadUsers = useCallback(async (p: number) => {
+    setLoading(true);
+    try {
+      const res = await listAdminUsers({ page: p, limit: PAGE_SIZE });
+      setUsers(res.users ?? []);
+      setTotal(res.total ?? 0);
+      setTotalPages(res.total_pages ?? 1);
+      setPage(p);
+    } catch {
+      setUsers([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadUsers(1);
+  }, [loadUsers]);
+
   const headerHeight = 60 + insets.top;
 
-  const handleDeactivate = (id: number) => {
-    Alert.alert('Deactivate User', 'Are you sure you want to deactivate this user?', [
+  const handleDeactivate = (user: AdminUser) => {
+    Alert.alert('Deactivate User', `Deactivate ${user.full_name}?`, [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Deactivate', style: 'destructive', onPress: () => {
-        setUsers(prev => prev.map(u => u.id === id ? { ...u, is_active: false, is_online: false } : u));
+      { text: 'Deactivate', style: 'destructive', onPress: async () => {
+        try {
+          await deactivateUser(user.id);
+          setUsers(prev => prev.map(u => u.id === user.id ? { ...u, is_active: false, is_online: false } : u));
+        } catch (e: unknown) {
+          Alert.alert('Error', e instanceof Error ? e.message : 'Failed to deactivate user');
+        }
       }},
     ]);
   };
 
-  const handleResetPassword = (name: string) => {
-    Alert.alert('Reset Password', `A password reset link will be sent to ${name}.`, [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Send Reset', onPress: () =>
-        Alert.alert('Done', 'Password reset link sent!') },
-    ]);
-  };
-
-  const handleAddUser = (u: UserItem) => {
-    setUsers(prev => [...prev, u]);
+  const handleAddUser = (u: AdminUser) => {
+    setUsers(prev => [u, ...prev]);
+    setTotal(t => t + 1);
     setShowAddModal(false);
-    setPage(Math.floor(users.length / PAGE_SIZE));
   };
 
   return (
@@ -219,7 +343,7 @@ export default function ManageUsersScreen() {
           </TouchableOpacity>
           <View style={styles.headerCenter}>
             <Text style={styles.headerTitle}>Manage Users</Text>
-            <Text style={styles.headerSub}>{users.length} employees</Text>
+            <Text style={styles.headerSub}>{loading ? '…' : `${total} employees`}</Text>
           </View>
           <TouchableOpacity onPress={() => setShowAddModal(true)} style={styles.addHeaderBtn}>
             <Ionicons name="add" size={22} color="#fff" />
@@ -227,54 +351,67 @@ export default function ManageUsersScreen() {
         </View>
       </View>
 
-      {/* Add Employee button bar */}
+      {/* Action bar */}
       <View style={[styles.actionBar, { backgroundColor: c.card, borderBottomColor: c.border }]}>
         <TouchableOpacity onPress={() => setShowAddModal(true)}
           style={[styles.addEmpBtn, { backgroundColor: CN.red }]}>
           <Ionicons name="person-add-outline" size={16} color="#fff" />
           <Text style={styles.addEmpBtnText}>Add Employee</Text>
         </TouchableOpacity>
-        <Text style={[styles.pageInfo, { color: c.label }]}>
-          {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, users.length)} of {users.length}
-        </Text>
+        {!loading && (
+          <Text style={[styles.pageInfo, { color: c.label }]}>
+            Page {page} of {totalPages}
+          </Text>
+        )}
       </View>
 
       {/* User list */}
-      <FlatList
-        data={pageUsers}
-        keyExtractor={(u) => String(u.id)}
-        style={{ flex: 1 }}
-        renderItem={({ item }) => (
-          <UserRow
-            user={item}
-            onDeactivate={() => handleDeactivate(item.id)}
-            onReset={() => handleResetPassword(item.full_name)}
-            isDark={isDark}
-          />
-        )}
-      />
+      {loading ? (
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+          <ActivityIndicator color={CN.red} />
+        </View>
+      ) : (
+        <FlatList
+          data={users}
+          keyExtractor={(u) => u.id}
+          style={{ flex: 1 }}
+          renderItem={({ item }) => (
+            <UserRow
+              user={item}
+              onDeactivate={() => handleDeactivate(item)}
+              onReset={() => setResetTarget(item)}
+              isDark={isDark}
+            />
+          )}
+          ListEmptyComponent={
+            <View style={{ paddingTop: 60, alignItems: 'center' }}>
+              <Text style={{ color: c.label, fontSize: 14 }}>No users found.</Text>
+            </View>
+          }
+        />
+      )}
 
       {/* Pagination */}
-      {totalPages > 1 && (
+      {totalPages > 1 && !loading && (
         <View style={[styles.pagination, {
           backgroundColor: c.card, borderTopColor: c.border,
           paddingBottom: insets.bottom > 0 ? insets.bottom : 12,
         }]}>
           <TouchableOpacity
-            onPress={() => setPage(p => Math.max(0, p - 1))}
-            disabled={page === 0}
-            style={[styles.pageBtn, { backgroundColor: c.gray100, opacity: page === 0 ? 0.4 : 1 }]}
+            onPress={() => loadUsers(page - 1)}
+            disabled={page <= 1}
+            style={[styles.pageBtn, { backgroundColor: c.gray100, opacity: page <= 1 ? 0.4 : 1 }]}
           >
             <Ionicons name="chevron-back" size={18} color={c.text} />
             <Text style={[styles.pageBtnText, { color: c.text }]}>Previous</Text>
           </TouchableOpacity>
           <Text style={[styles.pageLabel, { color: c.label }]}>
-            Page {page + 1} of {totalPages}
+            Page {page} of {totalPages}
           </Text>
           <TouchableOpacity
-            onPress={() => setPage(p => Math.min(totalPages - 1, p + 1))}
-            disabled={page >= totalPages - 1}
-            style={[styles.pageBtn, { backgroundColor: c.gray100, opacity: page >= totalPages - 1 ? 0.4 : 1 }]}
+            onPress={() => loadUsers(page + 1)}
+            disabled={page >= totalPages}
+            style={[styles.pageBtn, { backgroundColor: c.gray100, opacity: page >= totalPages ? 0.4 : 1 }]}
           >
             <Text style={[styles.pageBtnText, { color: c.text }]}>Next</Text>
             <Ionicons name="chevron-forward" size={18} color={c.text} />
@@ -288,6 +425,16 @@ export default function ManageUsersScreen() {
         onAdd={handleAddUser}
         isDark={isDark}
       />
+
+      {resetTarget && (
+        <ResetPasswordModal
+          userId={resetTarget.id}
+          userName={resetTarget.full_name}
+          visible
+          onClose={() => setResetTarget(null)}
+          isDark={isDark}
+        />
+      )}
     </View>
   );
 }

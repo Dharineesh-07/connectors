@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, Fragment } from 'react'
 import dayjs from 'dayjs'
 import { useParams, useOutletContext } from 'react-router-dom'
-import { useQuery } from 'react-query'
+import { useQuery, useQueryClient } from 'react-query'
 import toast from 'react-hot-toast'
 import { Bars3Icon, XMarkIcon } from '@heroicons/react/24/outline'
 import { getConversation, listConversations } from '../api/conversations'
@@ -70,6 +70,8 @@ export default function Chat() {
   const prevConnectedRef = useRef(connected)
   const bottomRef = useRef(null)
 
+  const queryClient = useQueryClient()
+
   const { data: conversation } = useQuery(
     ['conversation', conversationId],
     () => getConversation(conversationId),
@@ -136,12 +138,31 @@ export default function Chat() {
       const msgType = file.type.startsWith('image/') ? 'image' : 'file'
       await sendMessage(conversationId, {
         type: msgType,
-        file_url: uploaded.file_url,
+        file_url: uploaded.url,
+        file_name: uploaded.file_name,
+        file_size: uploaded.file_size,
+      })
+      queryClient.invalidateQueries(['conversation-attachments', conversationId])
+    } catch {
+      toast.error('File upload failed')
+    }
+  }
+
+  const handleVoiceMessage = async (file) => {
+    if (!isOnline || !connected) {
+      toast.error('Voice message requires an active connection')
+      return
+    }
+    try {
+      const uploaded = await uploadFile(file)
+      await sendMessage(conversationId, {
+        type: 'voice',
+        file_url: uploaded.url,
         file_name: uploaded.file_name,
         file_size: uploaded.file_size,
       })
     } catch {
-      toast.error('File upload failed')
+      toast.error('Failed to send voice message')
     }
   }
 
@@ -375,6 +396,7 @@ export default function Chat() {
         <MessageInput
           onSend={handleSend}
           onFileUpload={handleFileUpload}
+          onVoiceMessage={handleVoiceMessage}
           onTyping={handleTyping}
           replyMessage={replyMessage}
           onCancelReply={() => setReplyMessage(null)}

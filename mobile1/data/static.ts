@@ -44,7 +44,7 @@ export const CN = {
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 export type UserItem = {
-  id: number;
+  id: string;
   full_name: string;
   display_name: string;
   email: string;
@@ -56,7 +56,7 @@ export type UserItem = {
 };
 
 export type ConvMember = {
-  user_id: number;
+  user_id: string;
   user: UserItem;
 };
 
@@ -64,7 +64,7 @@ export type LastMessage = {
   id: string;
   content: string;
   type: string;
-  sender_id: number;
+  sender_id: string;
   created_at: string;
 };
 
@@ -81,7 +81,7 @@ export type Conversation = {
 export type Message = {
   id: string;
   conversation_id: string;
-  sender_id: number;
+  sender_id: string;
   sender: UserItem;
   content: string;
   type: 'text' | 'image' | 'file';
@@ -118,20 +118,20 @@ export type AuditLog = {
 
 // ── Demo credentials ──────────────────────────────────────────────────────────
 export const DEMO_CREDENTIALS = [
-  { email: 'admin@company.com', password: 'password', userId: 1 },
-  { email: 'john@company.com',  password: 'password', userId: 2 },
-  { email: 'jane@company.com',  password: 'password', userId: 3 },
-  { email: 'bob@company.com',   password: 'password', userId: 4 },
+  { email: 'admin@cnc.com', password: 'Admin@123' },
+  { email: 'alice@cnc.com', password: 'Alice@123' },
+  { email: 'bob@cnc.com',   password: 'Bob@1234'  },
+  { email: 'carol@cnc.com', password: 'Carol@123' },
 ];
 
 // ── Users ─────────────────────────────────────────────────────────────────────
 export const USERS: UserItem[] = [
-  { id: 1, full_name: 'Admin User',      display_name: 'Admin',   email: 'admin@company.com',  role: 'admin', department: 'IT',          is_online: true,  is_active: true  },
-  { id: 2, full_name: 'John Doe',        display_name: 'John',    email: 'john@company.com',   role: 'user',  department: 'Engineering', is_online: true,  is_active: true  },
-  { id: 3, full_name: 'Jane Smith',      display_name: 'Jane',    email: 'jane@company.com',   role: 'user',  department: 'Marketing',   is_online: false, is_active: true  },
-  { id: 4, full_name: 'Bob Wilson',      display_name: 'Bob',     email: 'bob@company.com',    role: 'user',  department: 'Sales',       is_online: true,  is_active: true  },
-  { id: 5, full_name: 'Alice Johnson',   display_name: 'Alice',   email: 'alice@company.com',  role: 'user',  department: 'HR',          is_online: false, is_active: true  },
-  { id: 6, full_name: 'Carlos Martinez', display_name: 'Carlos',  email: 'carlos@company.com', role: 'user',  department: 'Engineering', is_online: true,  is_active: true  },
+  { id: '1', full_name: 'Admin User',      display_name: 'Admin',   email: 'admin@company.com',  role: 'admin', department: 'IT',          is_online: true,  is_active: true  },
+  { id: '2', full_name: 'John Doe',        display_name: 'John',    email: 'john@company.com',   role: 'user',  department: 'Engineering', is_online: true,  is_active: true  },
+  { id: '3', full_name: 'Jane Smith',      display_name: 'Jane',    email: 'jane@company.com',   role: 'user',  department: 'Marketing',   is_online: false, is_active: true  },
+  { id: '4', full_name: 'Bob Wilson',      display_name: 'Bob',     email: 'bob@company.com',    role: 'user',  department: 'Sales',       is_online: true,  is_active: true  },
+  { id: '5', full_name: 'Alice Johnson',   display_name: 'Alice',   email: 'alice@company.com',  role: 'user',  department: 'HR',          is_online: false, is_active: true  },
+  { id: '6', full_name: 'Carlos Martinez', display_name: 'Carlos',  email: 'carlos@company.com', role: 'user',  department: 'Engineering', is_online: true,  is_active: true  },
 ];
 
 // ── Conversations ─────────────────────────────────────────────────────────────
@@ -140,20 +140,20 @@ export const INITIAL_CONVERSATIONS: Conversation[] = [
     id: 'conv1',
     type: 'direct',
     members: [
-      { user_id: 1, user: USERS[0] },
-      { user_id: 2, user: USERS[1] },
+      { user_id: '1', user: USERS[0] },
+      { user_id: '2', user: USERS[1] },
     ],
-    last_message: { id: 'm5', content: 'Sure, let me check on that!', type: 'text', sender_id: 2, created_at: '2026-05-17T09:30:00Z' },
+    last_message: { id: 'm5', content: 'Sure, let me check on that!', type: 'text', sender_id: '2', created_at: '2026-05-17T09:30:00Z' },
     unread_count: 2,
   },
   {
     id: 'conv2',
     type: 'direct',
     members: [
-      { user_id: 1, user: USERS[0] },
-      { user_id: 3, user: USERS[2] },
+      { user_id: '1', user: USERS[0] },
+      { user_id: '3', user: USERS[2] },
     ],
-    last_message: { id: 'm8', content: 'The meeting is at 3pm today', type: 'text', sender_id: 3, created_at: '2026-05-17T08:45:00Z' },
+    last_message: { id: 'm8', content: 'The meeting is at 3pm today', type: 'text', sender_id: '3', created_at: '2026-05-17T08:45:00Z' },
     unread_count: 0,
   },
   {
@@ -161,31 +161,31 @@ export const INITIAL_CONVERSATIONS: Conversation[] = [
     type: 'group',
     name: 'Engineering Team',
     members: [
-      { user_id: 1, user: USERS[0] },
-      { user_id: 2, user: USERS[1] },
-      { user_id: 6, user: USERS[5] },
+      { user_id: '1', user: USERS[0] },
+      { user_id: '2', user: USERS[1] },
+      { user_id: '6', user: USERS[5] },
     ],
-    last_message: { id: 'm14', content: 'PRs are ready for review', type: 'text', sender_id: 6, created_at: '2026-05-17T08:35:00Z' },
+    last_message: { id: 'm14', content: 'PRs are ready for review', type: 'text', sender_id: '6', created_at: '2026-05-17T08:35:00Z' },
     unread_count: 5,
   },
   {
     id: 'conv4',
     type: 'direct',
     members: [
-      { user_id: 1, user: USERS[0] },
-      { user_id: 4, user: USERS[3] },
+      { user_id: '1', user: USERS[0] },
+      { user_id: '4', user: USERS[3] },
     ],
-    last_message: { id: 'm17', content: 'Got it, thanks!', type: 'text', sender_id: 4, created_at: '2026-05-16T16:20:00Z' },
+    last_message: { id: 'm17', content: 'Got it, thanks!', type: 'text', sender_id: '4', created_at: '2026-05-16T16:20:00Z' },
     unread_count: 0,
   },
   {
     id: 'conv5',
     type: 'direct',
     members: [
-      { user_id: 1, user: USERS[0] },
-      { user_id: 5, user: USERS[4] },
+      { user_id: '1', user: USERS[0] },
+      { user_id: '5', user: USERS[4] },
     ],
-    last_message: { id: 'm20', content: 'Please review the policy document', type: 'text', sender_id: 5, created_at: '2026-05-16T14:00:00Z' },
+    last_message: { id: 'm20', content: 'Please review the policy document', type: 'text', sender_id: '5', created_at: '2026-05-16T14:00:00Z' },
     unread_count: 1,
   },
 ];
@@ -193,34 +193,34 @@ export const INITIAL_CONVERSATIONS: Conversation[] = [
 // ── Messages per conversation ─────────────────────────────────────────────────
 export const INITIAL_MESSAGES: Record<string, Message[]> = {
   conv1: [
-    { id: 'm1', conversation_id: 'conv1', sender_id: 2, sender: USERS[1], content: 'Hey, did you see the latest report?',  type: 'text', created_at: '2026-05-17T08:00:00Z' },
-    { id: 'm2', conversation_id: 'conv1', sender_id: 1, sender: USERS[0], content: "Not yet, I'll check it now.",          type: 'text', created_at: '2026-05-17T08:02:00Z' },
-    { id: 'm3', conversation_id: 'conv1', sender_id: 2, sender: USERS[1], content: "It's looking really good so far.",    type: 'text', created_at: '2026-05-17T08:03:00Z' },
-    { id: 'm4', conversation_id: 'conv1', sender_id: 1, sender: USERS[0], content: 'Thanks for the heads up.',            type: 'text', created_at: '2026-05-17T08:05:00Z' },
-    { id: 'm5', conversation_id: 'conv1', sender_id: 2, sender: USERS[1], content: 'Sure, let me check on that!',         type: 'text', created_at: '2026-05-17T09:30:00Z' },
+    { id: 'm1', conversation_id: 'conv1', sender_id: '2', sender: USERS[1], content: 'Hey, did you see the latest report?',  type: 'text', created_at: '2026-05-17T08:00:00Z' },
+    { id: 'm2', conversation_id: 'conv1', sender_id: '1', sender: USERS[0], content: "Not yet, I'll check it now.",          type: 'text', created_at: '2026-05-17T08:02:00Z' },
+    { id: 'm3', conversation_id: 'conv1', sender_id: '2', sender: USERS[1], content: "It's looking really good so far.",    type: 'text', created_at: '2026-05-17T08:03:00Z' },
+    { id: 'm4', conversation_id: 'conv1', sender_id: '1', sender: USERS[0], content: 'Thanks for the heads up.',            type: 'text', created_at: '2026-05-17T08:05:00Z' },
+    { id: 'm5', conversation_id: 'conv1', sender_id: '2', sender: USERS[1], content: 'Sure, let me check on that!',         type: 'text', created_at: '2026-05-17T09:30:00Z' },
   ],
   conv2: [
-    { id: 'm6', conversation_id: 'conv2', sender_id: 3, sender: USERS[2], content: 'Hi! Can we sync about the Q2 campaign?', type: 'text', created_at: '2026-05-17T08:30:00Z' },
-    { id: 'm7', conversation_id: 'conv2', sender_id: 1, sender: USERS[0], content: 'Sure, when works for you?',              type: 'text', created_at: '2026-05-17T08:40:00Z' },
-    { id: 'm8', conversation_id: 'conv2', sender_id: 3, sender: USERS[2], content: 'The meeting is at 3pm today',            type: 'text', created_at: '2026-05-17T08:45:00Z' },
+    { id: 'm6', conversation_id: 'conv2', sender_id: '3', sender: USERS[2], content: 'Hi! Can we sync about the Q2 campaign?', type: 'text', created_at: '2026-05-17T08:30:00Z' },
+    { id: 'm7', conversation_id: 'conv2', sender_id: '1', sender: USERS[0], content: 'Sure, when works for you?',              type: 'text', created_at: '2026-05-17T08:40:00Z' },
+    { id: 'm8', conversation_id: 'conv2', sender_id: '3', sender: USERS[2], content: 'The meeting is at 3pm today',            type: 'text', created_at: '2026-05-17T08:45:00Z' },
   ],
   conv3: [
-    { id: 'm9',  conversation_id: 'conv3', sender_id: 2, sender: USERS[1], content: 'Morning everyone!',                   type: 'text', created_at: '2026-05-16T09:00:00Z' },
-    { id: 'm10', conversation_id: 'conv3', sender_id: 6, sender: USERS[5], content: 'Good morning! Ready for the sprint?', type: 'text', created_at: '2026-05-16T09:01:00Z' },
-    { id: 'm11', conversation_id: 'conv3', sender_id: 1, sender: USERS[0], content: "Let's have a quick sync at 10am",     type: 'text', created_at: '2026-05-16T09:02:00Z' },
-    { id: 'm12', conversation_id: 'conv3', sender_id: 2, sender: USERS[1], content: "I've pushed the latest changes",      type: 'text', created_at: '2026-05-17T08:30:00Z' },
-    { id: 'm13', conversation_id: 'conv3', sender_id: 1, sender: USERS[0], content: "Great! I'll review them shortly",     type: 'text', created_at: '2026-05-17T08:32:00Z' },
-    { id: 'm14', conversation_id: 'conv3', sender_id: 6, sender: USERS[5], content: 'PRs are ready for review',            type: 'text', created_at: '2026-05-17T08:35:00Z' },
+    { id: 'm9',  conversation_id: 'conv3', sender_id: '2', sender: USERS[1], content: 'Morning everyone!',                   type: 'text', created_at: '2026-05-16T09:00:00Z' },
+    { id: 'm10', conversation_id: 'conv3', sender_id: '6', sender: USERS[5], content: 'Good morning! Ready for the sprint?', type: 'text', created_at: '2026-05-16T09:01:00Z' },
+    { id: 'm11', conversation_id: 'conv3', sender_id: '1', sender: USERS[0], content: "Let's have a quick sync at 10am",     type: 'text', created_at: '2026-05-16T09:02:00Z' },
+    { id: 'm12', conversation_id: 'conv3', sender_id: '2', sender: USERS[1], content: "I've pushed the latest changes",      type: 'text', created_at: '2026-05-17T08:30:00Z' },
+    { id: 'm13', conversation_id: 'conv3', sender_id: '1', sender: USERS[0], content: "Great! I'll review them shortly",     type: 'text', created_at: '2026-05-17T08:32:00Z' },
+    { id: 'm14', conversation_id: 'conv3', sender_id: '6', sender: USERS[5], content: 'PRs are ready for review',            type: 'text', created_at: '2026-05-17T08:35:00Z' },
   ],
   conv4: [
-    { id: 'm15', conversation_id: 'conv4', sender_id: 1, sender: USERS[0], content: 'Hey Bob, can you send the Q1 report?', type: 'text', created_at: '2026-05-16T16:00:00Z' },
-    { id: 'm16', conversation_id: 'conv4', sender_id: 4, sender: USERS[3], content: 'Sure, sending it over now.',           type: 'text', created_at: '2026-05-16T16:10:00Z' },
-    { id: 'm17', conversation_id: 'conv4', sender_id: 4, sender: USERS[3], content: 'Got it, thanks!',                     type: 'text', created_at: '2026-05-16T16:20:00Z' },
+    { id: 'm15', conversation_id: 'conv4', sender_id: '1', sender: USERS[0], content: 'Hey Bob, can you send the Q1 report?', type: 'text', created_at: '2026-05-16T16:00:00Z' },
+    { id: 'm16', conversation_id: 'conv4', sender_id: '4', sender: USERS[3], content: 'Sure, sending it over now.',           type: 'text', created_at: '2026-05-16T16:10:00Z' },
+    { id: 'm17', conversation_id: 'conv4', sender_id: '4', sender: USERS[3], content: 'Got it, thanks!',                     type: 'text', created_at: '2026-05-16T16:20:00Z' },
   ],
   conv5: [
-    { id: 'm18', conversation_id: 'conv5', sender_id: 5, sender: USERS[4], content: 'Hi, the new HR policy is live.',      type: 'text', created_at: '2026-05-16T13:00:00Z' },
-    { id: 'm19', conversation_id: 'conv5', sender_id: 1, sender: USERS[0], content: "Thanks Alice, I'll review it.",       type: 'text', created_at: '2026-05-16T13:30:00Z' },
-    { id: 'm20', conversation_id: 'conv5', sender_id: 5, sender: USERS[4], content: 'Please review the policy document',  type: 'text', created_at: '2026-05-16T14:00:00Z' },
+    { id: 'm18', conversation_id: 'conv5', sender_id: '5', sender: USERS[4], content: 'Hi, the new HR policy is live.',      type: 'text', created_at: '2026-05-16T13:00:00Z' },
+    { id: 'm19', conversation_id: 'conv5', sender_id: '1', sender: USERS[0], content: "Thanks Alice, I'll review it.",       type: 'text', created_at: '2026-05-16T13:30:00Z' },
+    { id: 'm20', conversation_id: 'conv5', sender_id: '5', sender: USERS[4], content: 'Please review the policy document',  type: 'text', created_at: '2026-05-16T14:00:00Z' },
   ],
 };
 

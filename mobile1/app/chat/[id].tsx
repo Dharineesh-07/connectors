@@ -1,5 +1,6 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
   FlatList,
   KeyboardAvoidingView,
   Platform,
@@ -10,6 +11,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import { Audio } from 'expo-av';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -17,10 +19,18 @@ import { StatusBar } from 'expo-status-bar';
 
 import { useAuth } from '@/context/AuthContext';
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import { CN, getInitials } from '@/data/static';
 import {
-  CN, INITIAL_CONVERSATIONS, INITIAL_MESSAGES, getInitials,
-  type Message, type Conversation,
-} from '@/data/static';
+  getConversation,
+  listMessages,
+  sendMessage,
+  sendVoiceMessage,
+  uploadVoiceFile,
+  markConversationRead,
+  type Conversation,
+  type Message,
+} from '@/api/conversations';
+import { wsClient } from '@/api/websocket';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function formatMsgTime(dateStr: string): string {
@@ -71,12 +81,21 @@ function MessageBubble({ msg, isSelf, showAvatar, senderName, isDark }: {
             ? [styles.bubbleSelf, { backgroundColor: c.msgSelf }]
             : [styles.bubbleOther, { backgroundColor: c.msgOther, borderColor: c.border }],
         ]}>
-          {msg.type !== 'text' ? (
+          {msg.type === 'voice' ? (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              <Text style={{ fontSize: 16 }}>🎙</Text>
+              <Text style={[styles.bubbleAttachment, { color: isSelf ? 'rgba(255,255,255,0.85)' : c.label }]}>
+                Voice message
+              </Text>
+            </View>
+          ) : msg.type !== 'text' ? (
             <Text style={[styles.bubbleAttachment, { color: isSelf ? 'rgba(255,255,255,0.7)' : c.label }]}>
               [{msg.type}]
             </Text>
           ) : (
-            <Text style={[styles.bubbleText, { color: isSelf ? '#fff' : c.text }]}>{msg.content}</Text>
+            <Text style={[styles.bubbleText, { color: isSelf ? '#fff' : c.text }]}>
+              {msg.is_deleted ? <Text style={{ fontStyle: 'italic', opacity: 0.6 }}>This message was deleted</Text> : msg.content}
+            </Text>
           )}
           <Text style={[styles.bubbleTime, { color: isSelf ? 'rgba(255,255,255,0.6)' : c.label }]}>
             {formatMsgTime(msg.created_at)}
@@ -98,38 +117,129 @@ export default function ChatScreen() {
   const insets = useSafeAreaInsets();
   const listRef = useRef<FlatList>(null);
 
-  const conv: Conversation | undefined = INITIAL_CONVERSATIONS.find((c) => c.id === id);
-  const [messages, setMessages] = useState<Message[]>(
-    INITIAL_MESSAGES[id ?? ''] ?? []
-  );
-  const [text, setText] = useState('');
+  const [conv, setConv]         = useState<Conversation | null>(null);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [loadingMsgs, setLoadingMsgs] = useState(true);
+  const [text, setText]         = useState('');
+  const [sending, setSending]   = useState(false);
+  const [recording, setRecording]         = useState(false);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const recordingRef  = useRef<Audio.Recording | null>(null);
+  const recordTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const handleSend = useCallback(() => {
-    const content = text.trim();
-    if (!content || !user) return;
-    setText('');
-    const newMsg: Message = {
-      id: `m_${Date.now()}`,
-      conversation_id: id ?? '',
-      sender_id: user.id,
-      sender: user,
-      content,
-      type: 'text',
-      created_at: new Date().toISOString(),
+  // Real-time presence: tracks online status overrides received from WS events.
+  const [onlineMap, setOnlineMap] = useState<Record<string, boolean>>({});
+
+  // Load conversation metadata and initial messages.
+  useEffect(() => {
+    if (!id) return;
+    getConversation(id).then(setConv).catch(() => {});
+    listMessages(id)
+      .then(r => setMessages(r.messages))
+      .catch(() => {})
+      .finally(() => setLoadingMsgs(false));
+    markConversationRead(id).catch(() => {});
+  }, [id]);
+
+  // WS: append incoming messages for this conversation.
+  useEffect(() => {
+    const off = wsClient.on('message:new', (data) => {
+      const msg = data as Message;
+      if (msg.conversation_id !== id) return;
+      setMessages(prev => {
+        if (prev.some(m => m.id === msg.id)) return prev;
+        return [...prev, msg];
+      });
+      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
+      markConversationRead(id ?? '').catch(() => {});
+    });
+    return off;
+  }, [id]);
+
+  // WS: update online status in real-time from presence events.
+  useEffect(() => {
+    const handlePresence = (data: unknown) => {
+      const d = data as { user_id: string; online: boolean };
+      if (d?.user_id) setOnlineMap(prev => ({ ...prev, [d.user_id]: d.online }));
     };
-    setMessages((prev) => [...prev, newMsg]);
-    setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
-  }, [text, user, id]);
+    const off1 = wsClient.on('user:presence', handlePresence);
+    const off2 = wsClient.on('user:online',   handlePresence);
+    const off3 = wsClient.on('user:offline',  handlePresence);
+    return () => { off1(); off2(); off3(); };
+  }, []);
 
-  // Resolve header info
+  const startRecording = useCallback(async () => {
+    try {
+      const { granted } = await Audio.requestPermissionsAsync();
+      if (!granted) return;
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
+      const { recording } = await Audio.Recording.createAsync(
+        Audio.RecordingOptionsPresets.HIGH_QUALITY,
+      );
+      recordingRef.current = recording;
+      setRecording(true);
+      setRecordingSeconds(0);
+      recordTimerRef.current = setInterval(() => setRecordingSeconds((s) => s + 1), 1000);
+    } catch {
+      // mic permission denied or device unavailable
+    }
+  }, []);
+
+  const stopRecording = useCallback(async () => {
+    if (!recordingRef.current || !id) return;
+    clearInterval(recordTimerRef.current!);
+    setRecording(false);
+    setRecordingSeconds(0);
+    try {
+      await recordingRef.current.stopAndUnloadAsync();
+      const uri = recordingRef.current.getURI();
+      recordingRef.current = null;
+      if (!uri) return;
+      const fileName = `voice-${Date.now()}.m4a`;
+      setSending(true);
+      const uploaded = await uploadVoiceFile(id, uri, fileName);
+      const msg = await sendVoiceMessage(id, uploaded.url, uploaded.file_name, uploaded.file_size);
+      setMessages((prev) => prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]);
+      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
+    } catch {
+      // upload or send failed
+    } finally {
+      setSending(false);
+    }
+  }, [id]);
+
+  const formatRecordTime = (s: number) =>
+    `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+
+  const handleSend = useCallback(async () => {
+    const content = text.trim();
+    if (!content || !user || !id || sending) return;
+    setText('');
+    setSending(true);
+    try {
+      const msg = await sendMessage(id, content);
+      setMessages(prev => {
+        if (prev.some(m => m.id === msg.id)) return prev;
+        return [...prev, msg];
+      });
+      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
+    } catch {
+      setText(content); // restore on failure
+    } finally {
+      setSending(false);
+    }
+  }, [text, user, id, sending]);
+
+  // Resolve header info from conversation data.
   const isGroup = conv?.type === 'group';
   const other = !isGroup ? conv?.members?.find((m) => m.user_id !== user?.id) : null;
   const convName = isGroup
     ? (conv?.name ?? 'Group')
     : (other?.user?.display_name || other?.user?.full_name || 'Chat');
+  const isOtherOnline = other ? (onlineMap[other.user_id] ?? !!other.user?.is_online) : false;
   const convSub = isGroup
     ? `${conv?.members?.length ?? 0} members`
-    : (other?.user?.is_online ? 'Online' : 'Offline');
+    : (isOtherOnline ? 'Online' : 'Offline');
 
   const headerHeight = 56 + insets.top;
 
@@ -170,47 +280,53 @@ export default function ChatScreen() {
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         keyboardVerticalOffset={headerHeight}
       >
-        <FlatList
-          ref={listRef}
-          data={messages}
-          keyExtractor={(m) => m.id}
-          style={{ flex: 1 }}
-          contentContainerStyle={{ paddingVertical: 12 }}
-          onLayout={() => listRef.current?.scrollToEnd({ animated: false })}
-          renderItem={({ item, index }) => {
-            const isSelf = item.sender_id === user?.id;
-            const prevMsg = index > 0 ? messages[index - 1] : null;
-            const showDate = !prevMsg || !sameDay(prevMsg.created_at, item.created_at);
-            const showAvatar = !isSelf && (prevMsg?.sender_id !== item.sender_id);
-            const senderName = item.sender?.display_name || item.sender?.full_name;
-            return (
-              <>
-                {showDate && (
-                  <View style={styles.dateSep}>
-                    <View style={[styles.dateLine, { backgroundColor: c.border }]} />
-                    <Text style={[styles.dateLabel, { color: c.label, backgroundColor: c.bg }]}>
-                      {formatDateSep(item.created_at)}
-                    </Text>
-                    <View style={[styles.dateLine, { backgroundColor: c.border }]} />
-                  </View>
-                )}
-                <MessageBubble
-                  msg={item}
-                  isSelf={isSelf}
-                  showAvatar={showAvatar}
-                  senderName={senderName}
-                  isDark={isDark}
-                />
-              </>
-            );
-          }}
-          ListEmptyComponent={
-            <View style={styles.emptyMessages}>
-              <Text style={{ fontSize: 36, marginBottom: 12 }}>💬</Text>
-              <Text style={[styles.emptyText, { color: c.label }]}>No messages yet. Say hi!</Text>
-            </View>
-          }
-        />
+        {loadingMsgs ? (
+          <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+            <ActivityIndicator color={CN.red} />
+          </View>
+        ) : (
+          <FlatList
+            ref={listRef}
+            data={messages}
+            keyExtractor={(m) => m.id}
+            style={{ flex: 1 }}
+            contentContainerStyle={{ paddingVertical: 12 }}
+            onLayout={() => listRef.current?.scrollToEnd({ animated: false })}
+            renderItem={({ item, index }) => {
+              const isSelf = item.sender_id === user?.id;
+              const prevMsg = index > 0 ? messages[index - 1] : null;
+              const showDate = !prevMsg || !sameDay(prevMsg.created_at, item.created_at);
+              const showAvatar = !isSelf && (prevMsg?.sender_id !== item.sender_id);
+              const senderName = item.sender?.display_name || item.sender?.full_name;
+              return (
+                <>
+                  {showDate && (
+                    <View style={styles.dateSep}>
+                      <View style={[styles.dateLine, { backgroundColor: c.border }]} />
+                      <Text style={[styles.dateLabel, { color: c.label, backgroundColor: c.bg }]}>
+                        {formatDateSep(item.created_at)}
+                      </Text>
+                      <View style={[styles.dateLine, { backgroundColor: c.border }]} />
+                    </View>
+                  )}
+                  <MessageBubble
+                    msg={item}
+                    isSelf={isSelf}
+                    showAvatar={showAvatar}
+                    senderName={senderName}
+                    isDark={isDark}
+                  />
+                </>
+              );
+            }}
+            ListEmptyComponent={
+              <View style={styles.emptyMessages}>
+                <Text style={{ fontSize: 36, marginBottom: 12 }}>💬</Text>
+                <Text style={[styles.emptyText, { color: c.label }]}>No messages yet. Say hi!</Text>
+              </View>
+            }
+          />
+        )}
 
         {/* Input bar */}
         <View style={[styles.inputBar, {
@@ -232,16 +348,40 @@ export default function ChatScreen() {
               returnKeyType="default"
             />
           </View>
-          <Pressable
-            onPress={handleSend}
-            disabled={!text.trim()}
-            style={({ pressed }) => [
-              styles.sendBtn,
-              { backgroundColor: text.trim() ? CN.red : c.gray100, opacity: pressed ? 0.8 : 1 },
-            ]}
-          >
-            <Ionicons name="send" size={18} color={text.trim() ? '#fff' : c.label} />
-          </Pressable>
+          {recording && (
+            <Text style={[styles.recordTimer, { color: CN.red }]}>
+              {formatRecordTime(recordingSeconds)}
+            </Text>
+          )}
+          {text.trim() ? (
+            <Pressable
+              onPress={handleSend}
+              disabled={sending}
+              style={({ pressed }) => [
+                styles.sendBtn,
+                { backgroundColor: CN.red, opacity: pressed ? 0.8 : 1 },
+              ]}
+            >
+              {sending
+                ? <ActivityIndicator color="#fff" size="small" />
+                : <Ionicons name="send" size={18} color="#fff" />
+              }
+            </Pressable>
+          ) : (
+            <Pressable
+              onPress={recording ? stopRecording : startRecording}
+              disabled={sending}
+              style={({ pressed }) => [
+                styles.sendBtn,
+                { backgroundColor: recording ? CN.red : CN.charcoal, opacity: pressed ? 0.8 : 1 },
+              ]}
+            >
+              {sending
+                ? <ActivityIndicator color="#fff" size="small" />
+                : <Ionicons name={recording ? 'stop' : 'mic'} size={18} color="#fff" />
+              }
+            </Pressable>
+          )}
         </View>
       </KeyboardAvoidingView>
     </View>
@@ -279,7 +419,8 @@ const styles = StyleSheet.create({
   bubbleAttachment: { fontSize: 13, fontStyle: 'italic' },
   bubbleTime:       { fontSize: 10, marginTop: 4, textAlign: 'right' },
 
-  inputBar:   { flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 10, paddingTop: 10, borderTopWidth: 1, gap: 8 },
+  inputBar:    { flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 10, paddingTop: 10, borderTopWidth: 1, gap: 8 },
+  recordTimer: { fontSize: 12, fontWeight: '700', alignSelf: 'center', minWidth: 36 },
   attachBtn:  { paddingBottom: 8 },
   inputWrap:  { flex: 1, borderRadius: 20, borderWidth: 1.5, paddingHorizontal: 14, paddingVertical: 8, maxHeight: 120 },
   textInput:  { fontSize: 15, lineHeight: 20, padding: 0 },

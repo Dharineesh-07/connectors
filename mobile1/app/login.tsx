@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Image,
   KeyboardAvoidingView,
@@ -15,9 +15,20 @@ import { Ionicons } from '@expo/vector-icons';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { useAuth } from '@/context/AuthContext';
+import { forgotPassword, resetPassword } from '@/api/auth';
 import { CN } from '@/data/static';
 
 type FormView = 'login' | 'forgot' | 'reset';
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function validateNewPassword(pwd: string): string | null {
+  if (pwd.length < 8)        return 'Password must be at least 8 characters.';
+  if (!/[A-Z]/.test(pwd))    return 'Must include at least one uppercase letter.';
+  if (!/[0-9]/.test(pwd))    return 'Must include at least one number.';
+  if (!/[^A-Za-z0-9]/.test(pwd)) return 'Must include at least one special character.';
+  return null;
+}
 
 export default function LoginScreen() {
   const scheme = useColorScheme();
@@ -36,14 +47,23 @@ export default function LoginScreen() {
   const [focused, setFocused]         = useState('');
   const [error, setError]             = useState('');
   const [loading, setLoading]         = useState(false);
-  const [otpSent, setOtpSent]         = useState(false);
+  const [resendCooldown, setResendCooldown] = useState(0);
+
+  // Count down the resend cooldown timer.
+  useEffect(() => {
+    if (resendCooldown <= 0) return;
+    const t = setTimeout(() => setResendCooldown(c => c - 1), 1000);
+    return () => clearTimeout(t);
+  }, [resendCooldown]);
 
   const handleLogin = async () => {
-    if (!email || !password) { setError('Please enter your email and password.'); return; }
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail || !password) { setError('Please enter your email and password.'); return; }
+    if (!EMAIL_RE.test(trimmedEmail)) { setError('Please enter a valid email address.'); return; }
     setError('');
     setLoading(true);
     try {
-      await login(email, password);
+      await login(trimmedEmail, password);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Login failed. Check your credentials.');
     } finally {
@@ -51,29 +71,40 @@ export default function LoginScreen() {
     }
   };
 
-  const handleRequestOTP = () => {
-    if (!email) { setError('Please enter your email address.'); return; }
+  const handleRequestOTP = async () => {
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail) { setError('Please enter your email address.'); return; }
+    if (!EMAIL_RE.test(trimmedEmail)) { setError('Please enter a valid email address.'); return; }
     setError('');
     setLoading(true);
-    setTimeout(() => {
-      setLoading(false);
-      setOtpSent(true);
+    try {
+      await forgotPassword(trimmedEmail);
+      setResendCooldown(60);
       setView('reset');
-    }, 600);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to send OTP. Try again.');
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const handleResetPassword = () => {
-    if (!otp || !newPassword) { setError('Please fill in all fields.'); return; }
-    if (otp !== '123456') { setError('Invalid OTP. (Hint: use 123456)'); return; }
+  const handleResetPassword = async () => {
+    if (otp.length !== 6)  { setError('Please enter the 6-digit code sent to your email.'); return; }
+    const pwdError = validateNewPassword(newPassword);
+    if (pwdError)          { setError(pwdError); return; }
     setError('');
     setLoading(true);
-    setTimeout(() => {
-      setLoading(false);
+    try {
+      await resetPassword(email.trim(), otp, newPassword);
       setView('login');
       setOtp('');
       setNewPassword('');
-      setOtpSent(false);
-    }, 600);
+      setResendCooldown(0);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to reset password. Check your OTP.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   const inputStyle = (field: string) => [
@@ -91,6 +122,7 @@ export default function LoginScreen() {
   ];
 
   const goBack = () => { setView('login'); setError(''); };
+  const goToForgot = () => { setView('forgot'); setOtp(''); setError(''); };
 
   // ── Login view ─────────────────────────────────────────────────────────────
   const renderLogin = () => (
@@ -140,13 +172,6 @@ export default function LoginScreen() {
         </View>
       </View>
 
-      <View style={[styles.demoHint, { backgroundColor: CN.blueLight }]}>
-        <Ionicons name="information-circle-outline" size={14} color={CN.blue} />
-        <Text style={[styles.demoHintText, { color: CN.blueDark }]}>
-          Demo: admin@company.com / password
-        </Text>
-      </View>
-
       <Pressable
         style={({ pressed }) => [styles.primaryBtn, { opacity: pressed ? 0.88 : 1 }]}
         onPress={handleLogin}
@@ -171,7 +196,7 @@ export default function LoginScreen() {
 
       <Text style={[styles.heading, { color: c.text }]}>Forgot password?</Text>
       <Text style={[styles.subheading, { color: c.sub }]}>
-        Enter your email and we'll send you a 6-digit OTP to reset your password.
+        Enter your email and we'll send you a 6-digit code to reset your password.
       </Text>
 
       <View style={styles.fieldGroup}>
@@ -195,7 +220,7 @@ export default function LoginScreen() {
         onPress={handleRequestOTP}
         disabled={loading}
       >
-        <Text style={styles.primaryBtnText}>{loading ? 'Sending…' : 'Send OTP →'}</Text>
+        <Text style={styles.primaryBtnText}>{loading ? 'Sending…' : 'Send Code →'}</Text>
       </Pressable>
     </View>
   );
@@ -203,10 +228,23 @@ export default function LoginScreen() {
   // ── Reset view ─────────────────────────────────────────────────────────────
   const renderReset = () => (
     <View style={styles.formSection}>
-      <Pressable style={styles.backBtn} onPress={() => setView('forgot')}>
-        <Ionicons name="arrow-back" size={14} color={c.label} />
-        <Text style={[styles.backBtnText, { color: c.label }]}>Change email</Text>
-      </Pressable>
+      <View style={styles.resetNav}>
+        <Pressable style={styles.backBtn} onPress={goToForgot}>
+          <Ionicons name="arrow-back" size={14} color={c.label} />
+          <Text style={[styles.backBtnText, { color: c.label }]}>Change email</Text>
+        </Pressable>
+
+        <Pressable
+          style={[styles.backBtn, resendCooldown > 0 && { opacity: 0.45 }]}
+          onPress={resendCooldown > 0 ? undefined : handleRequestOTP}
+          disabled={resendCooldown > 0 || loading}
+        >
+          <Ionicons name="refresh-outline" size={14} color={CN.blue} />
+          <Text style={[styles.backBtnText, { color: CN.blue }]}>
+            {resendCooldown > 0 ? `Resend in ${resendCooldown}s` : 'Resend code'}
+          </Text>
+        </Pressable>
+      </View>
 
       <View style={[styles.iconBadge, { backgroundColor: CN.redLight }]}>
         <Ionicons name="shield-checkmark-outline" size={24} color={CN.red} />
@@ -214,15 +252,16 @@ export default function LoginScreen() {
 
       <Text style={[styles.heading, { color: c.text }]}>Reset Password</Text>
       <Text style={[styles.subheading, { color: c.sub }]}>
-        Check <Text style={{ fontWeight: '700' }}>{email}</Text> for the 6-digit code.{' '}
-        <Text style={{ color: CN.blue }}>(Demo OTP: 123456)</Text>
+        A 6-digit code was sent to{' '}
+        <Text style={{ fontWeight: '700' }}>{email.trim()}</Text>.{' '}
+        It expires in 3 minutes.
       </Text>
 
       <View style={styles.fieldGroup}>
         <Text style={[styles.label, { color: c.label }]}>Verification Code</Text>
         <TextInput
           style={[inputStyle('otp'), styles.otpInput]}
-          placeholder="Enter 6-digit OTP"
+          placeholder="000000"
           placeholderTextColor={c.label}
           value={otp}
           onChangeText={t => setOtp(t.replace(/\D/g, '').slice(0, 6))}
@@ -246,12 +285,13 @@ export default function LoginScreen() {
             onFocus={() => setFocused('newPwd')}
             onBlur={() => setFocused('')}
             secureTextEntry={!showNewPwd}
+            textContentType="newPassword"
           />
           <Pressable style={styles.eyeBtn} onPress={() => setShowNewPwd(p => !p)}>
             <Ionicons name={showNewPwd ? 'eye-off-outline' : 'eye-outline'} size={20} color={c.label} />
           </Pressable>
         </View>
-        <Text style={[styles.hint, { color: c.label }]}>Min 8 chars, 1 uppercase, 1 special char</Text>
+        <Text style={[styles.hint, { color: c.label }]}>Min 8 chars · 1 uppercase · 1 number · 1 special</Text>
       </View>
 
       <Pressable
@@ -390,16 +430,6 @@ const styles = StyleSheet.create({
   otpInput: { textAlign: 'center', fontSize: 20, fontWeight: '700', letterSpacing: 12 },
   eyeBtn:   { position: 'absolute', right: 14, top: 0, bottom: 0, justifyContent: 'center' },
 
-  demoHint: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    borderRadius: 8,
-    padding: 10,
-    marginBottom: 12,
-  },
-  demoHintText: { fontSize: 11, fontWeight: '600' },
-
   primaryBtn: {
     marginTop: 8,
     height: 52,
@@ -416,7 +446,8 @@ const styles = StyleSheet.create({
   blueBtn:        { backgroundColor: CN.blue, shadowColor: CN.blue },
   primaryBtnText: { color: '#FFFFFF', fontSize: 15, fontWeight: '700' },
 
-  backBtn:     { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 20 },
+  resetNav:    { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
+  backBtn:     { flexDirection: 'row', alignItems: 'center', gap: 6 },
   backBtnText: { fontSize: 12, fontWeight: '700' },
   iconBadge:   { width: 48, height: 48, borderRadius: 16, alignItems: 'center', justifyContent: 'center', marginBottom: 16 },
   hint:        { fontSize: 10, marginTop: 6, marginLeft: 2 },

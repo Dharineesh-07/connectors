@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from 'react-query'
 import { addMembers, leaveConversation } from '../api/conversations'
 import { listUsers } from '../api/users'
 import { useAuth } from '../context/AuthContext'
+import { useOnlineUsers } from '../hooks/useOnlineUsers'
 import UserAvatar from './UserAvatar'
 import toast from 'react-hot-toast'
 
@@ -86,6 +87,12 @@ export default function ChatSidebarMembers({ conversationId, conversation, onClo
     }
   }
 
+  const initialOnlineIds = useMemo(
+    () => (conversation?.members ?? []).filter((m) => m.user?.is_online).map((m) => m.user_id),
+    [conversation]
+  )
+  const { onlineUsers } = useOnlineUsers(initialOnlineIds)
+
   const members = conversation?.members ?? []
   const currentMember = members.find((m) => m.user_id === user?.id)
   const isOnlyAdmin =
@@ -126,7 +133,7 @@ export default function ChatSidebarMembers({ conversationId, conversation, onClo
                 key={member.id ?? member.user_id}
                 className="flex items-center gap-3 p-3 rounded-2xl hover:bg-cn-gray-100/60 transition-all duration-200"
               >
-                <UserAvatar user={u} size="sm" online={u.is_online} />
+                <UserAvatar user={u} size="sm" online={onlineUsers.has(member.user_id)} />
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-bold text-cn-charcoal truncate">{name}</p>
                   <p className="text-[10px] text-cn-gray-400 truncate">{u.department || u.email || ''}</p>
@@ -267,7 +274,7 @@ export default function ChatSidebarMembers({ conversationId, conversation, onClo
                         selected ? 'bg-cn-blue-light' : 'hover:bg-cn-gray-100'
                       }`}
                     >
-                      <UserAvatar user={u} size="sm" online={u.is_online} />
+                      <UserAvatar user={u} size="sm" online={onlineUsers.has(u.id)} />
                       <div className="min-w-0 flex-1">
                         <p className="text-sm font-semibold text-cn-charcoal truncate">
                           {u.display_name || u.full_name}

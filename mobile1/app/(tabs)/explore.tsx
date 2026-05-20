@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
+  ActivityIndicator,
   FlatList,
   ScrollView,
   StyleSheet,
@@ -12,10 +13,13 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import { useAuth } from '@/context/AuthContext';
+import { CN, getInitials, formatTime, formatDuration } from '@/data/static';
 import {
-  CN, CALL_HISTORY, getInitials, formatTime, formatDuration,
-  type CallRecord,
-} from '@/data/static';
+  getCallHistory,
+  getCallDirection,
+  type ApiCall,
+} from '@/api/calls';
 
 type FilterType = 'all' | 'incoming' | 'outgoing' | 'missed';
 
@@ -26,7 +30,7 @@ const FILTERS: { key: FilterType; label: string }[] = [
   { key: 'missed',   label: 'Missed' },
 ];
 
-// ── MiniAvatar ────────────────────────────────────────────────────────────────
+// ── StackedAvatars ────────────────────────────────────────────────────────────
 function StackedAvatars({ names, size = 28 }: { names: string[]; size?: number }) {
   const shown = names.slice(0, 3);
   const extra = names.length - 3;
@@ -61,13 +65,14 @@ function StackedAvatars({ names, size = 28 }: { names: string[]; size?: number }
   );
 }
 
-// ── Status badge ──────────────────────────────────────────────────────────────
-function StatusBadge({ status }: { status: CallRecord['status'] }) {
+// ── StatusBadge ───────────────────────────────────────────────────────────────
+function StatusBadge({ status }: { status: ApiCall['status'] }) {
   const cfg = {
-    ended:   { bg: '#F0F2F4', text: '#6B7A8D', label: 'Ended' },
-    ongoing: { bg: '#E6F9EE', text: '#16A34A', label: 'Ongoing' },
-    missed:  { bg: '#F5E6E6', text: CN.red,    label: 'Missed'  },
-  }[status];
+    initiated: { bg: '#FFF9E6', text: '#D97706', label: 'Calling' },
+    ongoing:   { bg: '#E6F9EE', text: '#16A34A', label: 'Ongoing' },
+    missed:    { bg: '#F5E6E6', text: CN.red,    label: 'Missed'  },
+    ended:     { bg: '#F0F2F4', text: '#6B7A8D', label: 'Ended'   },
+  }[status] ?? { bg: '#F0F2F4', text: '#6B7A8D', label: status };
   return (
     <View style={[styles.badge, { backgroundColor: cfg.bg }]}>
       <Text style={[styles.badgeText, { color: cfg.text }]}>{cfg.label}</Text>
@@ -75,46 +80,61 @@ function StatusBadge({ status }: { status: CallRecord['status'] }) {
   );
 }
 
-// ── Direction icon ────────────────────────────────────────────────────────────
-function DirectionIcon({ direction, type }: { direction: CallRecord['direction']; type: CallRecord['type'] }) {
-  const color = direction === 'missed' ? CN.red : direction === 'incoming' ? CN.blue : CN.online;
-  const iconName: any =
-    direction === 'incoming' ? 'call-outline' :
-    direction === 'outgoing' ? 'call-outline' :
-    'call-outline';
+// ── DirectionIcon ─────────────────────────────────────────────────────────────
+function DirectionIcon({ direction, callType }: {
+  direction: 'incoming' | 'outgoing' | 'missed';
+  callType: ApiCall['type'];
+}) {
+  const color =
+    direction === 'missed'   ? CN.red   :
+    direction === 'incoming' ? CN.blue  : CN.online;
   return (
-    <View style={[styles.dirIcon, { backgroundColor: color + '18', transform: [{ scaleX: direction === 'outgoing' ? -1 : 1 }] }]}>
-      <Ionicons name={type === 'video' ? 'videocam-outline' : iconName} size={16} color={color} />
+    <View style={[styles.dirIcon, {
+      backgroundColor: color + '18',
+      transform: [{ scaleX: direction === 'outgoing' ? -1 : 1 }],
+    }]}>
+      <Ionicons
+        name={callType === 'video' ? 'videocam-outline' : 'call-outline'}
+        size={16}
+        color={color}
+      />
     </View>
   );
 }
 
 // ── CallCard ──────────────────────────────────────────────────────────────────
-function CallCard({ call, isDark }: { call: CallRecord; isDark: boolean }) {
+function CallCard({ call, currentUserId, isDark }: {
+  call: ApiCall;
+  currentUserId: string;
+  isDark: boolean;
+}) {
   const c = isDark ? CN.dark : CN.light;
-  const names = call.group_name
-    ? [call.group_name]
-    : call.participants.map(p => p.display_name || p.full_name);
-  const displayName = call.group_name ?? (call.participants[0]?.display_name || call.participants[0]?.full_name);
-  const isGroup = !!call.group_name || call.participants.length > 1;
-  const dirLabel = { incoming: 'Incoming', outgoing: 'Outgoing', missed: 'Missed' }[call.direction];
+  const direction = getCallDirection(call, currentUserId);
+
+  const otherParticipants = call.participants.filter(p => p.user_id !== currentUserId);
+  const names = otherParticipants.length > 0
+    ? otherParticipants.map(p => p.user?.display_name || p.user?.full_name || 'Unknown')
+    : [call.initiator?.display_name || call.initiator?.full_name || 'Unknown'];
+
+  const displayName = names[0] ?? 'Unknown';
+  const isGroup = call.participants.length > 2;
+  const dirLabel = { incoming: 'Incoming', outgoing: 'Outgoing', missed: 'Missed' }[direction];
 
   return (
     <View style={[styles.callCard, { backgroundColor: c.card, borderBottomColor: c.border }]}>
       <StackedAvatars names={names} size={44} />
-
       <View style={styles.callInfo}>
         <View style={styles.callRow}>
           <Text style={[styles.callName, { color: c.text }]} numberOfLines={1}>
             {displayName}
-            {isGroup && !call.group_name && ` +${call.participants.length - 1}`}
+            {isGroup && names.length > 1 && ` +${names.length - 1}`}
           </Text>
           <Text style={[styles.callTime, { color: c.label }]}>{formatTime(call.started_at)}</Text>
         </View>
         <View style={styles.callRow}>
           <View style={styles.callMeta}>
-            <DirectionIcon direction={call.direction} type={call.type} />
-            <Text style={[styles.callDir, { color: call.direction === 'missed' ? CN.red : c.sub }]}>
+            <DirectionIcon direction={direction} callType={call.type} />
+            <Text style={[styles.callDir, { color: direction === 'missed' ? CN.red : c.sub }]}>
               {dirLabel}
             </Text>
             {call.type === 'video' && (
@@ -129,8 +149,10 @@ function CallCard({ call, isDark }: { call: CallRecord; isDark: boolean }) {
             )}
           </View>
           <View style={styles.callRight}>
-            {call.duration_seconds && (
-              <Text style={[styles.duration, { color: c.label }]}>{formatDuration(call.duration_seconds)}</Text>
+            {call.duration_seconds != null && call.duration_seconds > 0 && (
+              <Text style={[styles.duration, { color: c.label }]}>
+                {formatDuration(call.duration_seconds)}
+              </Text>
             )}
             <StatusBadge status={call.status} />
           </View>
@@ -142,16 +164,39 @@ function CallCard({ call, isDark }: { call: CallRecord; isDark: boolean }) {
 
 // ── CallHistoryScreen ─────────────────────────────────────────────────────────
 export default function CallHistoryScreen() {
+  const { user } = useAuth();
   const scheme = useColorScheme();
   const isDark = scheme === 'dark';
   const c = isDark ? CN.dark : CN.light;
   const insets = useSafeAreaInsets();
 
-  const [filter, setFilter] = useState<FilterType>('all');
+  const [calls, setCalls]     = useState<ApiCall[]>([]);
+  const [total, setTotal]     = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [filter, setFilter]   = useState<FilterType>('all');
 
-  const filtered = CALL_HISTORY.filter(call => {
+  const loadCalls = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await getCallHistory({ limit: 50 });
+      setCalls(res.calls ?? []);
+      setTotal(res.total ?? 0);
+    } catch {
+      setCalls([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadCalls();
+  }, [loadCalls]);
+
+  const currentUserId = user?.id ?? '';
+
+  const filtered = calls.filter(call => {
     if (filter === 'all') return true;
-    return call.direction === filter;
+    return getCallDirection(call, currentUserId) === filter;
   });
 
   const headerHeight = 60 + insets.top;
@@ -173,7 +218,7 @@ export default function CallHistoryScreen() {
             <Ionicons name="call" size={18} color="#fff" />
             <Text style={styles.headerTitle}>Call History</Text>
           </View>
-          <Text style={styles.headerCount}>{CALL_HISTORY.length} calls</Text>
+          <Text style={styles.headerCount}>{total} calls</Text>
         </View>
       </View>
 
@@ -198,23 +243,31 @@ export default function CallHistoryScreen() {
       </View>
 
       {/* Call list */}
-      <FlatList
-        data={filtered}
-        keyExtractor={(call) => call.id}
-        style={{ flex: 1 }}
-        renderItem={({ item }) => <CallCard call={item} isDark={isDark} />}
-        ListEmptyComponent={
-          <View style={styles.emptyState}>
-            <View style={styles.emptyCircle}>
-              <Ionicons name="call-outline" size={32} color={CN.red} />
+      {loading ? (
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+          <ActivityIndicator color={CN.red} />
+        </View>
+      ) : (
+        <FlatList
+          data={filtered}
+          keyExtractor={(call) => call.id}
+          style={{ flex: 1 }}
+          renderItem={({ item }) => (
+            <CallCard call={item} currentUserId={currentUserId} isDark={isDark} />
+          )}
+          ListEmptyComponent={
+            <View style={styles.emptyState}>
+              <View style={styles.emptyCircle}>
+                <Ionicons name="call-outline" size={32} color={CN.red} />
+              </View>
+              <Text style={[styles.emptyTitle, { color: c.text }]}>No calls found</Text>
+              <Text style={[styles.emptySubtitle, { color: c.label }]}>
+                {filter !== 'all' ? `No ${filter} calls in history` : 'Your call history will appear here'}
+              </Text>
             </View>
-            <Text style={[styles.emptyTitle, { color: c.text }]}>No calls found</Text>
-            <Text style={[styles.emptySubtitle, { color: c.label }]}>
-              {filter !== 'all' ? `No ${filter} calls in history` : 'Your call history will appear here'}
-            </Text>
-          </View>
-        }
-      />
+          }
+        />
+      )}
     </View>
   );
 }

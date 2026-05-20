@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
+  ActivityIndicator,
   FlatList,
   ScrollView,
   StyleSheet,
@@ -13,11 +14,12 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
-import { CN, AUDIT_LOGS, type AuditLog } from '@/data/static';
+import { CN } from '@/data/static';
+import { getAuditLogs, type AuditLogEntry } from '@/api/admin';
 
-const PAGE_SIZE = 10;
+const PAGE_SIZE = 20;
 
-type ActionFilter = 'all' | AuditLog['action'];
+type ActionFilter = 'all' | string;
 
 const ACTION_FILTERS: { key: ActionFilter; label: string }[] = [
   { key: 'all',             label: 'All'            },
@@ -28,13 +30,15 @@ const ACTION_FILTERS: { key: ActionFilter; label: string }[] = [
   { key: 'broadcast',       label: 'Broadcast'      },
 ];
 
-const ACTION_META: Record<AuditLog['action'], { icon: string; color: string; label: string }> = {
+const ACTION_META: Record<string, { icon: string; color: string; label: string }> = {
   create_user:     { icon: 'person-add-outline',    color: CN.online,   label: 'Create User'    },
   update_user:     { icon: 'pencil-outline',         color: CN.blue,     label: 'Update User'    },
   deactivate_user: { icon: 'person-remove-outline', color: CN.red,      label: 'Deactivate'     },
   reset_password:  { icon: 'key-outline',            color: '#9333EA',   label: 'Reset Password' },
   broadcast:       { icon: 'megaphone-outline',      color: '#F59E0B',   label: 'Broadcast'      },
 };
+
+const DEFAULT_META = { icon: 'document-text-outline', color: CN.blue, label: 'Action' };
 
 function formatLogTime(dateStr: string): string {
   const d = new Date(dateStr);
@@ -45,9 +49,23 @@ function formatLogTime(dateStr: string): string {
 }
 
 // ── LogItem ───────────────────────────────────────────────────────────────────
-function LogItem({ log, isDark }: { log: AuditLog; isDark: boolean }) {
+function LogItem({ log, isDark }: { log: AuditLogEntry; isDark: boolean }) {
   const c = isDark ? CN.dark : CN.light;
-  const meta = ACTION_META[log.action];
+  const meta = ACTION_META[log.action] ?? DEFAULT_META;
+  const actor  = log.admin?.full_name ?? 'Admin';
+  const target = log.target_user?.full_name ?? 'All Users';
+
+  let details = '';
+  if (log.details) {
+    try {
+      const parsed = JSON.parse(log.details);
+      details = typeof parsed === 'object'
+        ? Object.entries(parsed).map(([k, v]) => `${k}: ${v}`).join(', ')
+        : String(parsed);
+    } catch {
+      details = log.details;
+    }
+  }
 
   return (
     <View style={[styles.logItem, { backgroundColor: c.card, borderBottomColor: c.border }]}>
@@ -62,16 +80,12 @@ function LogItem({ log, isDark }: { log: AuditLog; isDark: boolean }) {
           <Text style={[styles.logTime, { color: c.label }]}>{formatLogTime(log.created_at)}</Text>
         </View>
         <View style={styles.logBottomRow}>
-          <Text style={[styles.logActor, { color: c.text }]} numberOfLines={1}>
-            {log.actor}
-          </Text>
+          <Text style={[styles.logActor, { color: c.text }]} numberOfLines={1}>{actor}</Text>
           <Ionicons name="arrow-forward" size={12} color={c.label} style={{ marginHorizontal: 4 }} />
-          <Text style={[styles.logTarget, { color: c.sub }]} numberOfLines={1}>{log.target}</Text>
+          <Text style={[styles.logTarget, { color: c.sub }]} numberOfLines={1}>{target}</Text>
         </View>
-        {!!log.details && (
-          <Text style={[styles.logDetails, { color: c.label }]} numberOfLines={2}>
-            {log.details}
-          </Text>
+        {!!details && (
+          <Text style={[styles.logDetails, { color: c.label }]} numberOfLines={2}>{details}</Text>
         )}
       </View>
     </View>
@@ -86,20 +100,36 @@ export default function AuditLogsScreen() {
   const c = isDark ? CN.dark : CN.light;
   const insets = useSafeAreaInsets();
 
-  const [filter, setFilter] = useState<ActionFilter>('all');
-  const [page, setPage]     = useState(0);
+  const [logs, setLogs]         = useState<AuditLogEntry[]>([]);
+  const [total, setTotal]       = useState(0);
+  const [page, setPage]         = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [loading, setLoading]   = useState(true);
+  const [filter, setFilter]     = useState<ActionFilter>('all');
 
-  const filtered = filter === 'all'
-    ? AUDIT_LOGS
-    : AUDIT_LOGS.filter(l => l.action === filter);
+  const loadLogs = useCallback(async (p: number, action: ActionFilter) => {
+    setLoading(true);
+    try {
+      const params: Record<string, string | number> = { page: p, limit: PAGE_SIZE };
+      if (action !== 'all') params.action = action;
+      const res = await getAuditLogs(params);
+      setLogs(res.logs ?? []);
+      setTotal(res.total ?? 0);
+      setTotalPages(res.total_pages ?? 1);
+      setPage(p);
+    } catch {
+      setLogs([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  const currentPage = Math.min(page, totalPages - 1);
-  const pageLogs = filtered.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE);
+  useEffect(() => {
+    loadLogs(1, filter);
+  }, [loadLogs, filter]);
 
   const handleFilterChange = (f: ActionFilter) => {
     setFilter(f);
-    setPage(0);
   };
 
   const headerHeight = 60 + insets.top;
@@ -122,7 +152,7 @@ export default function AuditLogsScreen() {
           </TouchableOpacity>
           <View style={styles.headerCenter}>
             <Text style={styles.headerTitle}>Audit Logs</Text>
-            <Text style={styles.headerSub}>{filtered.length} entries</Text>
+            <Text style={styles.headerSub}>{loading ? '…' : `${total} entries`}</Text>
           </View>
           <View style={{ width: 38 }} />
         </View>
@@ -146,48 +176,47 @@ export default function AuditLogsScreen() {
         </ScrollView>
       </View>
 
-      {/* Range info */}
-      <View style={[styles.rangeBar, { backgroundColor: c.bg }]}>
-        <Text style={[styles.rangeText, { color: c.label }]}>
-          Showing {currentPage * PAGE_SIZE + 1}–{Math.min((currentPage + 1) * PAGE_SIZE, filtered.length)} of {filtered.length}
-        </Text>
-      </View>
-
       {/* Log list */}
-      <FlatList
-        data={pageLogs}
-        keyExtractor={(l) => l.id}
-        style={{ flex: 1 }}
-        renderItem={({ item }) => <LogItem log={item} isDark={isDark} />}
-        ListEmptyComponent={
-          <View style={styles.emptyState}>
-            <Ionicons name="document-text-outline" size={36} color={c.label} />
-            <Text style={[styles.emptyText, { color: c.label }]}>No logs found</Text>
-          </View>
-        }
-      />
+      {loading ? (
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+          <ActivityIndicator color={CN.red} />
+        </View>
+      ) : (
+        <FlatList
+          data={logs}
+          keyExtractor={(l) => l.id}
+          style={{ flex: 1 }}
+          renderItem={({ item }) => <LogItem log={item} isDark={isDark} />}
+          ListEmptyComponent={
+            <View style={styles.emptyState}>
+              <Ionicons name="document-text-outline" size={36} color={c.label} />
+              <Text style={[styles.emptyText, { color: c.label }]}>No logs found</Text>
+            </View>
+          }
+        />
+      )}
 
       {/* Pagination */}
-      {totalPages > 1 && (
+      {totalPages > 1 && !loading && (
         <View style={[styles.pagination, {
           backgroundColor: c.card, borderTopColor: c.border,
           paddingBottom: insets.bottom > 0 ? insets.bottom : 12,
         }]}>
           <TouchableOpacity
-            onPress={() => setPage(p => Math.max(0, p - 1))}
-            disabled={currentPage === 0}
-            style={[styles.pageBtn, { backgroundColor: c.gray100, opacity: currentPage === 0 ? 0.4 : 1 }]}
+            onPress={() => loadLogs(page - 1, filter)}
+            disabled={page <= 1}
+            style={[styles.pageBtn, { backgroundColor: c.gray100, opacity: page <= 1 ? 0.4 : 1 }]}
           >
             <Ionicons name="chevron-back" size={18} color={c.text} />
             <Text style={[styles.pageBtnText, { color: c.text }]}>Previous</Text>
           </TouchableOpacity>
           <Text style={[styles.pageLabel, { color: c.label }]}>
-            {currentPage + 1} / {totalPages}
+            {page} / {totalPages}
           </Text>
           <TouchableOpacity
-            onPress={() => setPage(p => Math.min(totalPages - 1, p + 1))}
-            disabled={currentPage >= totalPages - 1}
-            style={[styles.pageBtn, { backgroundColor: c.gray100, opacity: currentPage >= totalPages - 1 ? 0.4 : 1 }]}
+            onPress={() => loadLogs(page + 1, filter)}
+            disabled={page >= totalPages}
+            style={[styles.pageBtn, { backgroundColor: c.gray100, opacity: page >= totalPages ? 0.4 : 1 }]}
           >
             <Text style={[styles.pageBtnText, { color: c.text }]}>Next</Text>
             <Ionicons name="chevron-forward" size={18} color={c.text} />
@@ -211,9 +240,6 @@ const styles = StyleSheet.create({
   filterScroll: { paddingHorizontal: 12, paddingVertical: 10, gap: 8 },
   filterBtn:    { paddingHorizontal: 14, paddingVertical: 7, borderRadius: 20 },
   filterBtnText:{ fontSize: 12, fontWeight: '600' },
-
-  rangeBar:     { paddingHorizontal: 16, paddingVertical: 8 },
-  rangeText:    { fontSize: 12 },
 
   logItem:      { flexDirection: 'row', alignItems: 'flex-start', paddingHorizontal: 14, paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, gap: 12 },
   logIconWrap:  { width: 36, height: 36, borderRadius: 10, alignItems: 'center', justifyContent: 'center', marginTop: 2 },
