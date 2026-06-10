@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"net/http"
+	"os/signal"
+	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/gin-contrib/cors"
@@ -15,6 +17,7 @@ import (
 	"github.com/orgchat/backend/middleware"
 	"github.com/orgchat/backend/models"
 	"github.com/orgchat/backend/services"
+	"github.com/orgchat/backend/sfu"
 	"github.com/orgchat/backend/store"
 	ws "github.com/orgchat/backend/websocket"
 )
@@ -27,6 +30,12 @@ func main() {
 	services.SetAuthDomain(config.App.CompanyEmailDomain)
 
 	wsManager := ws.NewManager()
+
+	// WebRTC SFU — forwards call/meeting media between participants.
+	sfuInstance, err := sfu.New()
+	if err != nil {
+		log.Fatalf("failed to start SFU: %v", err)
+	}
 
 	// services
 	authSvc := &services.AuthService{}
@@ -48,12 +57,22 @@ func main() {
 	msgsH := &handlers.MessagesHandler{Service: msgSvc, WS: wsManager}
 	callsH := &handlers.CallsHandler{Service: callSvc, WS: wsManager}
 	remindersH := &handlers.RemindersHandler{}
+	announcementsH := &handlers.AnnouncementsHandler{WS: wsManager}
+	meetingsH := &handlers.MeetingsHandler{CallService: callSvc, WS: wsManager}
+	gcalSvc := &services.GoogleCalendarService{}
+	gcalH := &handlers.GoogleCalendarHandler{Service: gcalSvc}
+	tasksH := &handlers.TasksHandler{WS: wsManager}
+	whiteboardH := &handlers.WhiteboardHandler{}
+	pollsH := &handlers.PollsHandler{WS: wsManager}
 	wsH := &handlers.WSHandler{
 		WS:          wsManager,
 		MsgService:  msgSvc,
 		CallService: callSvc,
 		NotifSvc:    notifSvc,
+		SFU:         sfuInstance,
 	}
+	// When SFU room membership changes, broadcast a labelled participant roster.
+	sfuInstance.SetRosterCallback(wsH.BuildRoster)
 
 	r := gin.Default()
 
@@ -67,8 +86,12 @@ func main() {
 		MaxAge:           12 * time.Hour,
 	}))
 
-	// static uploads
-	r.Static("/uploads", config.App.UploadsDir)
+	// static uploads — force download to prevent browsers rendering active content (e.g. HTML)
+	r.GET("/uploads/*filepath", func(c *gin.Context) {
+		c.Header("Content-Disposition", "attachment")
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.File(filepath.Join(config.App.UploadsDir, c.Param("filepath")))
+	})
 
 	// health
 	r.GET("/health", func(c *gin.Context) {
@@ -116,6 +139,10 @@ func main() {
 	convs.POST("/:conversation_id/members", convsH.AddMembers)
 	convs.POST("/:conversation_id/join", convsH.Join)
 	convs.DELETE("/:conversation_id/members/:user_id", convsH.RemoveMember)
+	convs.PATCH("/:conversation_id/archive", convsH.Archive)
+	convs.DELETE("/:conversation_id/archive", convsH.Unarchive)
+	convs.DELETE("/:conversation_id/messages", convsH.ClearMessages)
+	convs.DELETE("/:conversation_id", convsH.Delete)
 
 	// message routes
 	msgs := r.Group("/api", middleware.AuthRequired())
@@ -128,14 +155,45 @@ func main() {
 	msgs.POST("/messages/upload", msgsH.UploadFile)
 	msgs.GET("/conversations/:conversation_id/search", msgsH.SearchMessages)
 	msgs.GET("/conversations/:conversation_id/attachments", msgsH.GetAttachments)
+	msgs.GET("/messages/:message_id/thread", msgsH.GetThreadReplies)
+	// reactions
+	msgs.POST("/messages/:message_id/react", msgsH.ReactToMessage)
+	// pinning
+	msgs.GET("/conversations/:conversation_id/pinned", msgsH.GetPinnedMessages)
+	msgs.POST("/conversations/:conversation_id/messages/:message_id/pin", msgsH.PinMessage)
+	msgs.DELETE("/conversations/:conversation_id/messages/:message_id/pin", msgsH.UnpinMessage)
+	// scheduled messages
+	msgs.POST("/conversations/:conversation_id/messages/schedule", msgsH.ScheduleMessage)
+	msgs.GET("/conversations/:conversation_id/scheduled", msgsH.GetScheduledMessages)
+	msgs.DELETE("/scheduled-messages/:scheduled_id", msgsH.DeleteScheduledMessage)
+	// link preview
+	msgs.GET("/link-preview", msgsH.GetLinkPreview)
 
 	// call routes
 	calls := r.Group("/api/calls", middleware.AuthRequired())
+	calls.GET("/ice-servers", callsH.ICEServers)
 	calls.POST("/initiate", callsH.InitiateCall)
 	calls.POST("/:call_id/join", callsH.JoinCall)
 	calls.POST("/:call_id/leave", callsH.LeaveCall)
 	calls.GET("/history", callsH.GetHistory)
 	calls.POST("/:call_id/invite", callsH.InviteToCall)
+	calls.GET("/:call_id/waiting", callsH.GetWaitingRoom)
+	calls.POST("/:call_id/waiting/:user_id/admit", callsH.AdmitParticipant)
+	calls.DELETE("/:call_id/waiting/:user_id", callsH.RejectWaiting)
+
+	// meeting routes
+	meetings := r.Group("/api/meetings", middleware.AuthRequired())
+	meetings.GET("", meetingsH.List)
+	meetings.POST("", meetingsH.Create)
+	meetings.DELETE("/:meeting_id", meetingsH.Delete)
+	meetings.POST("/:meeting_id/join", meetingsH.Join)
+
+	// task routes
+	tasks := r.Group("/api/tasks", middleware.AuthRequired())
+	tasks.GET("", tasksH.List)
+	tasks.POST("", tasksH.Create)
+	tasks.PATCH("/:task_id", tasksH.Update)
+	tasks.DELETE("/:task_id", tasksH.Delete)
 
 	// reminder routes
 	reminders := r.Group("/api/reminders", middleware.AuthRequired())
@@ -144,29 +202,109 @@ func main() {
 	reminders.PATCH("/:reminder_id", remindersH.Update)
 	reminders.DELETE("/:reminder_id", remindersH.Delete)
 
-	// background task: check reminders every 30s
-	go checkReminders(notifSvc)
+	// announcement routes
+	announcements := r.Group("/api/announcements", middleware.AuthRequired())
+	announcements.GET("", announcementsH.List)
+	announcements.POST("", announcementsH.Create)
+	announcements.PATCH("/:announcement_id/pin", announcementsH.TogglePin)
+	announcements.DELETE("/:announcement_id", announcementsH.Delete)
 
-	log.Println("OrgChat API running on :8000")
-	if err := r.Run(":8000"); err != nil {
-		log.Fatal(err)
+	// poll routes
+	convs.POST("/:conversation_id/polls", pollsH.CreatePoll)
+	polls := r.Group("/api/polls", middleware.AuthRequired())
+	polls.GET("/:poll_id", pollsH.GetPoll)
+	polls.POST("/:poll_id/vote", pollsH.Vote)
+	polls.PATCH("/:poll_id/close", pollsH.ClosePoll)
+
+	// Google Calendar OAuth routes
+	// Callback is public — browser redirect from Google carries no JWT
+	r.GET("/api/google/calendar/callback", gcalH.Callback)
+	gcal := r.Group("/api/google/calendar", middleware.AuthRequired())
+	gcal.GET("/auth", gcalH.Authorize)
+	gcal.GET("/status", gcalH.Status)
+	gcal.GET("/events", gcalH.Events)
+	gcal.DELETE("/disconnect", gcalH.Disconnect)
+
+	// whiteboard draft routes
+	convs.GET("/:conversation_id/whiteboard", whiteboardH.GetDraft)
+	convs.PUT("/:conversation_id/whiteboard", whiteboardH.SaveDraft)
+	convs.PATCH("/:conversation_id/whiteboard/name", whiteboardH.RenameDraft)
+	convs.POST("/:conversation_id/whiteboard/publish", whiteboardH.PublishDraft)
+	convs.DELETE("/:conversation_id/whiteboard", whiteboardH.DeleteDraft)
+	wb := r.Group("/api/whiteboard", middleware.AuthRequired())
+	wb.GET("/my-drafts", whiteboardH.ListDrafts)
+
+	// E2EE toggle on a DM conversation
+	convs.PATCH("/:conversation_id/e2ee", convsH.ToggleE2EE)
+
+	// public-key endpoints
+	users.PUT("/me/public-key", usersH.SetPublicKey)
+	users.GET("/:user_id/public-key", usersH.GetPublicKey)
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// background task: check reminders every 30s
+	go checkReminders(ctx, notifSvc)
+	// background task: send scheduled messages every 30s
+	go processScheduledMessages(ctx, msgSvc, wsManager)
+
+	srv := &http.Server{Addr: ":8000", Handler: r}
+	go func() {
+		log.Println("OrgChat API running on :8000")
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
+	}()
+
+	<-ctx.Done()
+	stop()
+	log.Println("Shutting down...")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("shutdown error: %v", err)
 	}
 }
 
-func checkReminders(notifSvc *services.NotificationService) {
+func processScheduledMessages(ctx context.Context, msgSvc *services.MessageService, wsManager *ws.Manager) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		now := time.Now()
-		var reminders []models.Reminder
-		database.DB.Where("is_completed = ? AND notified = ? AND due_date <= ?", false, false, now).Find(&reminders)
-		for _, r := range reminders {
-			notifSvc.CreateAndPush(r.UserID, "reminder", "Reminder", r.Title, map[string]string{"reminder_id": r.ID})
-			database.DB.Model(&r).Update("notified", true)
-			fmt.Printf("[REMINDER] sent to user %s: %s\n", r.UserID, r.Title)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sent := msgSvc.ProcessScheduledMessages()
+			for _, msg := range sent {
+				var members []models.ConversationMember
+				database.DB.Where("conversation_id = ?", msg.ConversationID).Find(&members)
+				for _, m := range members {
+					wsManager.SendToUser(m.UserID, "message:new", msg)
+				}
+				log.Printf("[SCHEDULED] sent message %s in conv %s", msg.ID, msg.ConversationID)
+			}
 		}
-		// cleanup expired OTPs
-		database.DB.Where("expires_at < ?", now).Delete(&models.PasswordResetOTP{})
-		_ = context.Background()
+	}
+}
+
+func checkReminders(ctx context.Context, notifSvc *services.NotificationService) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			now := time.Now()
+			var reminders []models.Reminder
+			database.DB.Where("is_completed = ? AND notified = ? AND due_date <= ?", false, false, now).Find(&reminders)
+			for _, r := range reminders {
+				notifSvc.CreateAndPush(r.UserID, "reminder", "Reminder", r.Title, map[string]string{"reminder_id": r.ID})
+				database.DB.Model(&r).Update("notified", true)
+				log.Printf("[REMINDER] sent to user %s: %s", r.UserID, r.Title)
+			}
+			database.DB.Where("expires_at < ?", now).Delete(&models.PasswordResetOTP{})
+		}
 	}
 }

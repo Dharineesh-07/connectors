@@ -9,3 +9,9 @@ export const updateProfile = (data) => api.put('/users/me', data).then((r) => r.
 
 export const registerFCMToken = (token) =>
   api.post('/users/fcm-token', { token })
+
+export const uploadPublicKey = (publicKey) =>
+  api.put('/users/me/public-key', { public_key: publicKey })
+
+export const getUserPublicKey = (userId) =>
+  api.get(`/users/${userId}/public-key`).then((r) => r.data)

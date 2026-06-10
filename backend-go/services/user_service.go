@@ -91,7 +91,6 @@ func (s *UserService) CreateUser(adminID string, email, fullName string, departm
 		FullName:     fullName,
 		Department:   department,
 		Role:         r,
-		CreatedByID:  &adminID,
 	}
 
 	tx := database.DB.Begin()
@@ -105,8 +104,14 @@ func (s *UserService) CreateUser(adminID string, email, fullName string, departm
 	}
 	tx.Commit()
 
-	// mock invite email
-	fmt.Printf("[EMAIL] Invite sent to %s with temp password: %s\n", email, tempPassword)
+	// Auto-add new user to all existing public groups
+	var publicGroups []models.Conversation
+	database.DB.Where("type = ? AND is_private = ?", "group", false).Find(&publicGroups)
+	for _, conv := range publicGroups {
+		database.DB.Where(models.ConversationMember{ConversationID: conv.ID, UserID: user.ID}).
+			FirstOrCreate(&models.ConversationMember{ConversationID: conv.ID, UserID: user.ID, Role: "member"})
+	}
+
 	return user, nil
 }
 
@@ -183,12 +188,18 @@ func (s *UserService) DeactivateUser(adminID, userID string) error {
 		return errors.New("cannot deactivate your own account")
 	}
 	tx := database.DB.Begin()
-	tx.Model(&models.User{}).Where("id = ?", userID).Updates(map[string]interface{}{
+	if err := tx.Model(&models.User{}).Where("id = ?", userID).Updates(map[string]interface{}{
 		"is_active": false,
 		"is_online": false,
 		"status":    "offline",
-	})
-	s.LogAdminAction(tx, adminID, "deactivate_user", &userID, nil)
+	}).Error; err != nil {
+		tx.Rollback()
+		return err
+	}
+	if err := s.LogAdminAction(tx, adminID, "deactivate_user", &userID, nil); err != nil {
+		tx.Rollback()
+		return err
+	}
 	if err := tx.Commit().Error; err != nil {
 		tx.Rollback()
 		return err
@@ -206,8 +217,14 @@ func (s *UserService) ResetUserPassword(adminID, userID, newPassword string) err
 		return err
 	}
 	tx := database.DB.Begin()
-	tx.Model(&models.User{}).Where("id = ?", userID).Update("password_hash", hash)
-	s.LogAdminAction(tx, adminID, "reset_password", &userID, nil)
+	if err := tx.Model(&models.User{}).Where("id = ?", userID).Update("password_hash", hash).Error; err != nil {
+		tx.Rollback()
+		return err
+	}
+	if err := s.LogAdminAction(tx, adminID, "reset_password", &userID, nil); err != nil {
+		tx.Rollback()
+		return err
+	}
 	if err := tx.Commit().Error; err != nil {
 		tx.Rollback()
 		return err
@@ -286,10 +303,6 @@ func (s *UserService) UpdateSelf(userID string, updates map[string]interface{}) 
 }
 
 func (s *UserService) StoreFCMToken(userID, token string) {
-	// store FCM token in Redis: fcm:{user_id}
-	from := fmt.Sprintf("fcm:%s", userID)
-	database.DB.Exec("SELECT 1") // keep DB alive; actual store is Redis
-	_ = from
-	// in real impl: store.RDB.Set(ctx, "fcm:"+userID, token, 0)
-	fmt.Printf("[FCM] stored token for user %s\n", userID)
+	// TODO: integrate real push provider; store token in Redis
+	// store.RDB.Set(ctx, "fcm:"+userID, token, 0)
 }

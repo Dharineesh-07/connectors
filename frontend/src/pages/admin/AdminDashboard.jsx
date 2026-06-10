@@ -2,7 +2,9 @@ import { useQuery } from 'react-query'
 import {
   UsersIcon,
   WifiIcon,
+  XMarkIcon,
 } from '@heroicons/react/24/outline'
+import { useNavigate } from 'react-router-dom'
 import { getStats } from '../../api/admin'
 import { useAuth } from '../../context/AuthContext'
 import Logo from '../../components/Logo'
@@ -50,6 +52,7 @@ function StatCard({ icon: Icon, label, value, gradient, index }) {
 
 export default function AdminDashboard() {
   const { user } = useAuth()
+  const navigate = useNavigate()
   const { data: stats, isLoading } = useQuery('admin-stats', getStats, {
     refetchInterval: 30_000,
   })
@@ -94,8 +97,15 @@ export default function AdminDashboard() {
           </h1>
           <p className="text-white/50 text-xs mt-1 font-medium">Admin Dashboard</p>
         </div>
-        <div className="relative z-10 opacity-80">
-          <Logo size="md" showText={false} />
+        <div className="relative z-10 flex items-center gap-3">
+          <Logo size="md" showText={false} className="opacity-80" />
+          <button
+            onClick={() => navigate('/')}
+            className="p-2 rounded-lg text-white/70 hover:text-white hover:bg-white/15 transition-all duration-200"
+            title="Close"
+          >
+            <XMarkIcon className="w-5 h-5" />
+          </button>
         </div>
       </div>
 

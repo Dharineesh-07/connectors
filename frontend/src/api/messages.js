@@ -36,3 +36,32 @@ export const getAttachments = (conversationId) =>
 
 export const reactToMessage = (messageId, emoji) =>
   api.post(`/messages/${messageId}/react`, { emoji }).then((r) => r.data)
+
+export const getThreadReplies = (messageId) =>
+  api.get(`/messages/${messageId}/thread`).then((r) => r.data)
+
+export const getPinnedMessages = (conversationId) =>
+  api.get(`/conversations/${conversationId}/pinned`).then((r) => r.data)
+
+export const pinMessage = (conversationId, messageId) =>
+  api.post(`/conversations/${conversationId}/messages/${messageId}/pin`).then((r) => r.data)
+
+export const unpinMessage = (conversationId, messageId) =>
+  api.delete(`/conversations/${conversationId}/messages/${messageId}/pin`)
+
+export const scheduleMessage = (conversationId, data) =>
+  api.post(`/conversations/${conversationId}/messages/schedule`, data).then((r) => r.data)
+
+export const getScheduledMessages = (conversationId) =>
+  api.get(`/conversations/${conversationId}/scheduled`).then((r) => r.data)
+
+export const deleteScheduledMessage = (scheduledId) =>
+  api.delete(`/scheduled-messages/${scheduledId}`)
+
+export const getLinkPreview = (url) =>
+  api.get('/link-preview', { params: { url } }).then((r) => r.data)
+
+export const getMessagesByDate = (conversationId, date) =>
+  api
+    .get(`/conversations/${conversationId}/messages`, { params: { around_date: date } })
+    .then((r) => r.data)

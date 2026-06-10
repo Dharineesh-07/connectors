@@ -119,7 +119,7 @@ export default function ChatSidebarSearch({ conversationId, onClose, onViewMessa
                🔍
             </div>
             <p className="font-bold text-cn-charcoal text-sm">No matches found</p>
-            <p className="text-xs text-cn-gray-400 mt-2 px-10">We couldn't find anything matching "{debouncedQuery}" in this conversation.</p>
+            <p className="text-xs text-cn-gray-400 mt-2 px-10">We couldn&apos;t find anything matching &quot;{debouncedQuery}&quot; in this conversation.</p>
           </div>
         ) : (
           <div className="flex flex-col items-center justify-center py-20 text-center opacity-60 animate-cn-fade-up">

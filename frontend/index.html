@@ -5,9 +5,9 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#CC3333" />
-    <meta name="application-name" content="COMPUNET connections" />
-    <meta name="description" content="COMPUNET connections — Internal Communication Platform" />
-    <title>COMPUNET connections</title>
+    <meta name="application-name" content="Connectors" />
+    <meta name="description" content="Connectors — Internal Communication Platform" />
+    <title>Connectors</title>
   </head>
   <body>
     <script>
@@ -23,6 +23,14 @@
         } catch (error) {
           document.documentElement.dataset.theme = 'light'
         }
+
+        try {
+          var fs = window.localStorage.getItem('msg_font_size')
+          var sizes = { sm: '0.75rem', md: '0.875rem', lg: '1.0625rem' }
+          if (fs && sizes[fs]) {
+            document.documentElement.style.setProperty('--msg-font-size', sizes[fs])
+          }
+        } catch (e) {}
       })()
     </script>
     <div id="root"></div>

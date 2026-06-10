@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { listMessages, markRead, markConversationRead } from '../api/messages'
+import { listMessages, markRead, markConversationRead, getMessagesByDate } from '../api/messages'
 import { useSocket } from '../context/SocketContext'
 
 export function useMessages(conversationId) {
@@ -109,6 +109,20 @@ export function useMessages(conversationId) {
   }, [on, conversationId])
 
   useEffect(() => {
+    return on('thread:new_reply', (data) => {
+      if (data.conversation_id === conversationId) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === data.parent_message_id
+              ? { ...m, thread_replies: [...(m.thread_replies || []), data.reply] }
+              : m
+          )
+        )
+      }
+    })
+  }, [on, conversationId])
+
+  useEffect(() => {
     return on('message:read_receipt', (data) => {
       setMessages((prev) =>
         prev.map((m) => {
@@ -137,9 +151,48 @@ export function useMessages(conversationId) {
     })
   }, [on])
 
+  useEffect(() => {
+    return on('poll:voted', (data) => {
+      if (data.conversation_id === conversationId) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === data.message_id ? { ...m, poll: data.poll } : m
+          )
+        )
+      }
+    })
+  }, [on, conversationId])
+
+  useEffect(() => {
+    return on('poll:closed', (data) => {
+      if (data.conversation_id === conversationId) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === data.message_id && m.poll
+              ? { ...m, poll: { ...m.poll, is_closed: true } }
+              : m
+          )
+        )
+      }
+    })
+  }, [on, conversationId])
+
   const updateMessage = useCallback((messageId, updater) => {
     setMessages((prev) => prev.map((m) => (m.id === messageId ? updater(m) : m)))
   }, [])
 
-  return { messages, hasMore, loading, loadMore: () => load(false), updateMessage }
+  const jumpToDate = useCallback(async (dateStr) => {
+    if (!conversationId) return
+    setLoading(true)
+    try {
+      const data = await getMessagesByDate(conversationId, dateStr)
+      setHasMore(data.has_more)
+      cursorRef.current = data.next_cursor || null
+      setMessages(data.messages)
+    } finally {
+      setLoading(false)
+    }
+  }, [conversationId])
+
+  return { messages, hasMore, loading, loadMore: () => load(false), updateMessage, jumpToDate }
 }

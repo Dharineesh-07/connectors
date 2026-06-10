@@ -1,9 +1,12 @@
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import ReactDOM from 'react-dom'
 import dayjs from 'dayjs'
-import { DocumentIcon } from '@heroicons/react/24/outline'
+import { DocumentIcon, LockClosedIcon } from '@heroicons/react/24/outline'
 import UserAvatar from './UserAvatar'
 import ImageLightbox from './ImageLightbox'
+import LinkPreviewCard, { extractURLs } from './LinkPreviewCard'
+import PollMessage from './PollMessage'
+import MarkdownContent from './MarkdownContent'
 
 function formatFileSize(bytes) {
   if (!bytes) return ''
@@ -14,7 +17,30 @@ function formatFileSize(bytes) {
 }
 
 const IMAGE_EXTS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'avif'])
-const REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '😡']
+const DEFAULT_REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '😡']
+
+function getFrequentEmojis() {
+  try {
+    const raw = localStorage.getItem('orgchat-reaction-history')
+    if (!raw) return DEFAULT_REACTION_EMOJIS
+    const counts = JSON.parse(raw)
+    const sorted = Object.entries(counts)
+      .sort(([, a], [, b]) => b - a)
+      .map(([emoji]) => emoji)
+    return [...new Set([...sorted, ...DEFAULT_REACTION_EMOJIS])].slice(0, 6)
+  } catch {
+    return DEFAULT_REACTION_EMOJIS
+  }
+}
+
+function trackReactionUse(emoji) {
+  try {
+    const raw = localStorage.getItem('orgchat-reaction-history')
+    const counts = raw ? JSON.parse(raw) : {}
+    counts[emoji] = (counts[emoji] || 0) + 1
+    localStorage.setItem('orgchat-reaction-history', JSON.stringify(counts))
+  } catch {}
+}
 
 function isImageFile(fileName) {
   if (!fileName) return false
@@ -69,7 +95,18 @@ function ThreeDotIcon() {
   )
 }
 
-export default function MessageBubble({
+
+function highlightMentions(text) {
+  if (!text) return text
+  const parts = text.split(/(@here|@channel)/g)
+  return parts.map((part, i) =>
+    part === '@here' || part === '@channel'
+      ? <span key={i} style={{ background: 'rgba(59,130,246,0.15)', color: '#3b82f6', borderRadius: 4, padding: '1px 4px', fontWeight: 700 }}>{part}</span>
+      : part
+  )
+}
+
+function MessageBubble({
   message,
   isOwn,
   currentUserId,
@@ -79,6 +116,13 @@ export default function MessageBubble({
   onEdit,
   onDelete,
   onReact,
+  onOpenThread,
+  onPin,
+  isPinned,
+  onCreateTask,
+  conversationMembers,
+  onPollUpdate,
+  decrypt,
 }) {
   const [lightboxOpen, setLightboxOpen] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
@@ -86,9 +130,19 @@ export default function MessageBubble({
   const [isEditing, setIsEditing] = useState(false)
   const [editText, setEditText] = useState('')
   const [menuStyle, setMenuStyle] = useState({})
+  const [decryptedContent, setDecryptedContent] = useState(null)
   const menuRef = useRef(null)
   const dotBtnRef = useRef(null)
   const editRef = useRef(null)
+
+  // Decrypt content if this is an E2EE message
+  useEffect(() => {
+    if (!message.is_encrypted || !decrypt || !message.content) {
+      setDecryptedContent(null)
+      return
+    }
+    decrypt(message.content).then(setDecryptedContent).catch(() => setDecryptedContent('[Decryption failed]'))
+  }, [message.id, message.is_encrypted, message.content, decrypt])
 
   const isDeleted = message.is_deleted
   const isImage =
@@ -110,8 +164,7 @@ export default function MessageBubble({
     e.stopPropagation()
     if (!menuOpen && dotBtnRef.current) {
       const rect = dotBtnRef.current.getBoundingClientRect()
-      // Approx height: emoji bar (56) + 2 base items (72) + own items (88) = ~216 max
-      const menuHeight = isOwn ? 160 : 216
+      const menuHeight = isOwn ? 176 : 232
       const spaceBelow = window.innerHeight - rect.bottom - 4
       const openUp = spaceBelow < menuHeight && rect.top > menuHeight
 
@@ -159,7 +212,10 @@ export default function MessageBubble({
 
   const reactions = message.reactions || []
   const reactionGroups = reactions.reduce((acc, r) => {
-    acc[r.emoji] = (acc[r.emoji] || 0) + 1
+    if (!acc[r.emoji]) acc[r.emoji] = { count: 0, users: [] }
+    acc[r.emoji].count++
+    const name = r.user?.display_name || r.user?.full_name || 'Someone'
+    acc[r.emoji].users.push(name)
     return acc
   }, {})
 
@@ -167,14 +223,14 @@ export default function MessageBubble({
   const canEdit = isOwn && !isDeleted && minutesSinceSent <= 10
   const canDelete = isOwn && !isDeleted && minutesSinceSent <= 30
 
-  const showMenuTrigger = (hovered || menuOpen) && !isDeleted
+  const showActions = (hovered || menuOpen) && !isDeleted
 
   const dropdownMenu =
     menuOpen &&
     ReactDOM.createPortal(
       <div
         ref={menuRef}
-        className="bg-cn-white rounded-xl py-1 min-w-[160px] animate-cn-fade-up"
+        className="bg-cn-white rounded-xl py-1 min-w-[170px] animate-cn-fade-up"
         style={{
           ...menuStyle,
           boxShadow: '0 8px 32px rgba(0,0,0,0.14)',
@@ -184,11 +240,12 @@ export default function MessageBubble({
         {!isOwn && (
           <>
             <div className="flex items-center justify-around px-2 py-2">
-              {REACTION_EMOJIS.map((emoji) => (
+              {getFrequentEmojis().map((emoji) => (
                 <button
                   key={emoji}
                   onClick={() => {
                     onReact?.(message.id, emoji)
+                    trackReactionUse(emoji)
                     setMenuOpen(false)
                   }}
                   className="text-xl hover:scale-125 transition-transform duration-100 leading-none p-0.5"
@@ -213,6 +270,19 @@ export default function MessageBubble({
 
         <button
           onClick={() => {
+            onOpenThread?.(message)
+            setMenuOpen(false)
+          }}
+          className="w-full text-left px-4 py-2 text-sm text-cn-gray-700 hover:bg-cn-gray-100 flex items-center gap-2"
+        >
+          <svg width="13" height="13" viewBox="0 0 20 20" fill="currentColor" style={{ flexShrink: 0 }}>
+            <path fillRule="evenodd" d="M2 5a2 2 0 012-2h12a2 2 0 012 2v7a2 2 0 01-2 2H6l-4 4V5z" clipRule="evenodd" />
+          </svg>
+          Reply in thread
+        </button>
+
+        <button
+          onClick={() => {
             onForward?.(message)
             setMenuOpen(false)
           }}
@@ -220,6 +290,28 @@ export default function MessageBubble({
         >
           <span>↪</span> Forward
         </button>
+
+        <button
+          onClick={() => {
+            onPin?.(message, isPinned)
+            setMenuOpen(false)
+          }}
+          className="w-full text-left px-4 py-2 text-sm text-cn-gray-700 hover:bg-cn-gray-100 flex items-center gap-2"
+        >
+          <span>📌</span> {isPinned ? 'Unpin' : 'Pin'}
+        </button>
+
+        {!isDeleted && message.type === 'text' && (
+          <button
+            onClick={() => {
+              onCreateTask?.(message)
+              setMenuOpen(false)
+            }}
+            className="w-full text-left px-4 py-2 text-sm text-cn-gray-700 hover:bg-cn-gray-100 flex items-center gap-2"
+          >
+            <span>✅</span> Create Task
+          </button>
+        )}
 
         {(canEdit || canDelete) && (
           <>
@@ -284,8 +376,8 @@ export default function MessageBubble({
 
         {message.reply_to && !isDeleted && (
           <div
-            className={`px-3 py-1.5 text-xs mb-1 max-w-full truncate rounded-xl ${
-              isOwn ? 'text-white/75' : 'text-cn-gray-600'
+            className={`px-3 py-1.5 text-xs mb-1 max-w-full rounded-xl overflow-hidden ${
+              isOwn ? '' : 'text-cn-gray-600'
             }`}
             style={
               isOwn
@@ -293,24 +385,32 @@ export default function MessageBubble({
                 : { background: 'var(--cn-gray-100)', borderLeft: '2px solid var(--cn-blue)' }
             }
           >
-            {message.reply_to.content ?? `[${message.reply_to.type}]`}
+            <p
+              className="font-semibold truncate"
+              style={{ color: isOwn ? 'rgba(255,255,255,0.9)' : 'var(--cn-blue)' }}
+            >
+              ↩ {message.reply_to.sender?.display_name || message.reply_to.sender?.full_name || 'Unknown'}
+            </p>
+            <p className={`truncate mt-0.5 ${isOwn ? 'text-white/60' : 'text-cn-gray-500'}`}>
+              {message.reply_to.content ?? `[${message.reply_to.type}]`}
+            </p>
           </div>
         )}
 
-        <div
-          className={`flex items-end gap-1 ${isOwn ? 'flex-row-reverse' : 'flex-row'}`}
-        >
-          {message.type === 'voice' && message.file_url && !isDeleted ? (
+        <div className={`flex items-end gap-1 ${isOwn ? 'flex-row-reverse' : 'flex-row'}`}>
+          {message.type === 'poll' && message.poll && !isDeleted ? (
+            <PollMessage poll={message.poll} isOwn={isOwn} onPollUpdate={onPollUpdate} />
+          ) : message.type === 'voice' && message.file_url && !isDeleted ? (
             <div
               className={`rounded-2xl ${isOwn ? 'rounded-br-sm' : 'rounded-bl-sm'} px-3 py-2`}
               style={
                 isOwn
                   ? { background: 'linear-gradient(135deg, #CC3333 0%, #A52266 100%)', boxShadow: '0 4px 14px rgba(204,51,51,0.35)' }
-                  : { background: 'var(--cn-white)', border: '1.5px solid var(--cn-gray-200)', boxShadow: 'var(--shadow-card)' }
+                  : { background: 'var(--cn-gray-200)', border: '1.5px solid var(--cn-gray-400)', boxShadow: 'var(--shadow-card)' }
               }
             >
               <div className="flex items-center gap-2 mb-1">
-                <span className="text-sm">{isOwn ? '🎙' : '🎙'}</span>
+                <span className="text-sm">🎙</span>
                 <span className={`text-xs font-semibold ${isOwn ? 'text-white/80' : 'text-cn-gray-500'}`}>Voice message</span>
               </div>
               <audio
@@ -326,11 +426,7 @@ export default function MessageBubble({
                 className={`rounded-2xl overflow-hidden cursor-pointer transition-transform duration-150 hover:scale-[1.02] ${
                   isOwn ? 'rounded-br-sm' : 'rounded-bl-sm'
                 }`}
-                style={{
-                  boxShadow: isOwn
-                    ? '0 4px 14px rgba(204,51,51,0.35)'
-                    : 'var(--shadow-card)',
-                }}
+                style={{ boxShadow: isOwn ? '0 4px 14px rgba(204,51,51,0.35)' : 'var(--shadow-card)' }}
                 onClick={() => setLightboxOpen(true)}
               >
                 <img
@@ -353,15 +449,8 @@ export default function MessageBubble({
               className={`rounded-2xl ${isOwn ? 'rounded-br-sm' : 'rounded-bl-sm'} p-3 min-w-[180px]`}
               style={
                 isOwn
-                  ? {
-                      background: 'linear-gradient(135deg, #CC3333 0%, #A52266 100%)',
-                      boxShadow: '0 4px 14px rgba(204,51,51,0.35)',
-                    }
-                  : {
-                      background: 'var(--cn-white)',
-                      border: '1.5px solid var(--cn-gray-200)',
-                      boxShadow: 'var(--shadow-card)',
-                    }
+                  ? { background: 'linear-gradient(135deg, #CC3333 0%, #A52266 100%)', boxShadow: '0 4px 14px rgba(204,51,51,0.35)' }
+                  : { background: 'var(--cn-gray-200)', border: '1.5px solid var(--cn-gray-400)', boxShadow: 'var(--shadow-card)' }
               }
             >
               <textarea
@@ -374,26 +463,16 @@ export default function MessageBubble({
                   isOwn ? 'text-white placeholder-white/50' : 'text-cn-gray-800'
                 }`}
               />
-              <div
-                className={`flex gap-2 mt-1 text-xs ${isOwn ? 'justify-end' : 'justify-start'}`}
-              >
+              <div className={`flex gap-2 mt-1 text-xs ${isOwn ? 'justify-end' : 'justify-start'}`}>
                 <button
                   onClick={cancelEdit}
-                  className={`px-2 py-0.5 rounded ${
-                    isOwn
-                      ? 'text-white/70 hover:text-white'
-                      : 'text-cn-gray-400 hover:text-cn-gray-600'
-                  }`}
+                  className={`px-2 py-0.5 rounded ${isOwn ? 'text-white/70 hover:text-white' : 'text-cn-gray-400 hover:text-cn-gray-600'}`}
                 >
                   Cancel
                 </button>
                 <button
                   onClick={submitEdit}
-                  className={`px-2 py-0.5 rounded font-semibold ${
-                    isOwn
-                      ? 'text-white hover:bg-white/20'
-                      : 'text-cn-blue hover:bg-cn-blue/10'
-                  }`}
+                  className={`px-2 py-0.5 rounded font-semibold ${isOwn ? 'text-white hover:bg-white/20' : 'text-cn-blue hover:bg-cn-blue/10'}`}
                 >
                   Save
                 </button>
@@ -401,23 +480,16 @@ export default function MessageBubble({
             </div>
           ) : (
             <div
-              className={`px-4 py-2.5 text-sm break-words transition-transform duration-150 hover:scale-[1.02] ${
-                isOwn
-                  ? 'text-white rounded-2xl rounded-br-sm'
-                  : 'text-cn-gray-800 rounded-2xl rounded-bl-sm'
+              className={`px-4 py-2.5 break-words transition-transform duration-150 hover:scale-[1.02] min-w-[80px] ${
+                isOwn ? 'text-white rounded-2xl rounded-br-sm' : 'text-cn-gray-800 rounded-2xl rounded-bl-sm'
               } ${isDeleted ? 'italic opacity-50' : ''}`}
-              style={
-                isOwn
-                  ? {
-                      background: 'linear-gradient(135deg, #CC3333 0%, #A52266 100%)',
-                      boxShadow: '0 4px 14px rgba(204,51,51,0.35)',
-                    }
-                  : {
-                      background: 'var(--cn-white)',
-                      border: '1.5px solid var(--cn-gray-200)',
-                      boxShadow: 'var(--shadow-card)',
-                    }
-              }
+              style={{
+                ...(isOwn
+                  ? { background: 'linear-gradient(135deg, #CC3333 0%, #A52266 100%)', boxShadow: '0 4px 14px rgba(204,51,51,0.35)' }
+                  : { background: 'var(--cn-gray-200)', border: '1.5px solid var(--cn-gray-400)', boxShadow: 'var(--shadow-card)' }
+                ),
+                fontSize: 'var(--msg-font-size)',
+              }}
             >
               {message.type === 'file' && !isDeleted ? (
                 <a
@@ -442,20 +514,26 @@ export default function MessageBubble({
                   )}
                 </a>
               ) : (
-                message.content
+                <div className="flex items-start gap-1.5">
+                  {message.is_encrypted && (
+                    <LockClosedIcon className={`w-3 h-3 mt-0.5 flex-shrink-0 ${isOwn ? 'text-white/50' : 'text-cn-gray-400'}`} />
+                  )}
+                  <MarkdownContent text={decryptedContent ?? message.content} isOwn={isOwn} />
+                </div>
               )}
             </div>
           )}
 
-          {/* Three-dot trigger — dropdown rendered via portal to avoid overflow clipping */}
-          <div className="self-center flex-shrink-0">
+          {/* Hover actions */}
+          <div className={`self-center flex-shrink-0 flex gap-0.5 ${isOwn ? 'flex-row-reverse' : 'flex-row'}`}>
+            {/* Three-dot menu */}
             <button
               ref={dotBtnRef}
               onClick={openMenu}
               className="p-1 rounded-full transition-fast"
               style={{
-                color: showMenuTrigger ? 'var(--cn-gray-400)' : 'transparent',
-                pointerEvents: showMenuTrigger ? 'auto' : 'none',
+                color: showActions ? 'var(--cn-gray-400)' : 'transparent',
+                pointerEvents: showActions ? 'auto' : 'none',
               }}
               title="Message options"
             >
@@ -465,24 +543,33 @@ export default function MessageBubble({
           </div>
         </div>
 
+        {message.type === 'text' && !isDeleted && extractURLs(message.content).map((url) => (
+          <LinkPreviewCard key={url} url={url} />
+        ))}
+
         {Object.keys(reactionGroups).length > 0 && (
           <div
             className={`flex flex-wrap gap-1 mt-0.5 max-w-full ${isOwn ? 'justify-end' : 'justify-start'}`}
           >
-            {Object.entries(reactionGroups).map(([emoji, count]) => (
-              <span
+            {Object.entries(reactionGroups).map(([emoji, { count, users }]) => (
+              <button
                 key={emoji}
-                className="inline-flex items-center gap-0.5 text-xs px-1.5 py-0.5 rounded-full bg-cn-white border border-cn-gray-200"
+                onClick={() => onReact?.(message.id, emoji)}
+                title={users.join(', ')}
+                className="inline-flex items-center gap-0.5 text-xs px-1.5 py-0.5 rounded-full bg-cn-white border border-cn-gray-200 hover:bg-cn-blue-light hover:border-cn-blue transition-fast"
                 style={{ boxShadow: 'var(--shadow-card)' }}
               >
                 {emoji}
                 {count > 1 && <span className="text-cn-gray-400 ml-0.5">{count}</span>}
-              </span>
+              </button>
             ))}
           </div>
         )}
 
         <span className="text-xs flex items-center gap-0.5 text-cn-gray-400 px-1">
+          {message.is_encrypted && (
+            <LockClosedIcon className="w-2.5 h-2.5 text-cn-blue" title="End-to-end encrypted" />
+          )}
           {dayjs(message.created_at).format('HH:mm')}
           {message.is_edited && !isDeleted && (
             <span className="ml-1 opacity-60">(edited)</span>
@@ -491,7 +578,25 @@ export default function MessageBubble({
             <ReceiptTicks receipts={message.receipts} currentUserId={currentUserId} />
           )}
         </span>
+
+        {!isDeleted && message.thread_replies?.length > 0 && (
+          <button
+            onClick={() => onOpenThread?.(message)}
+            className="flex items-center gap-1 text-xs px-1 mt-0.5 transition-colors duration-150"
+            style={{ color: 'var(--cn-blue)' }}
+            onMouseEnter={(e) => (e.currentTarget.style.textDecoration = 'underline')}
+            onMouseLeave={(e) => (e.currentTarget.style.textDecoration = 'none')}
+          >
+            <svg width="11" height="11" viewBox="0 0 20 20" fill="currentColor">
+              <path fillRule="evenodd" d="M2 5a2 2 0 012-2h12a2 2 0 012 2v7a2 2 0 01-2 2H6l-4 4V5z" clipRule="evenodd" />
+            </svg>
+            {message.thread_replies.length} {message.thread_replies.length === 1 ? 'reply' : 'replies'}
+          </button>
+        )}
+
       </div>
     </div>
   )
 }
+
+export default memo(MessageBubble)

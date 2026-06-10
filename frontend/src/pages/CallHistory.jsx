@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useQuery } from 'react-query'
+import { useNavigate } from 'react-router-dom'
 import {
   PhoneIcon,
   VideoCameraIcon,
@@ -10,6 +11,7 @@ import {
   ChevronLeftIcon,
   ChevronRightIcon,
   ClockIcon,
+  XMarkIcon,
 } from '@heroicons/react/24/outline'
 import dayjs from 'dayjs'
 import relativeTime from 'dayjs/plugin/relativeTime'
@@ -24,17 +26,18 @@ dayjs.extend(relativeTime)
 dayjs.extend(duration)
 
 const STATUS_CONFIG = {
-  ended:     { label: 'Ended',       color: '#22C55E', bg: 'rgba(34,197,94,0.12)', glow: 'rgba(34,197,94,0.25)', icon: '✓' },
-  ongoing:   { label: 'In a call',   color: '#3399CC', bg: 'rgba(51,153,204,0.12)', glow: 'rgba(51,153,204,0.30)', icon: null },
-  initiated: { label: 'Ringing',     color: '#F59E0B', bg: 'rgba(245,158,11,0.12)', glow: 'rgba(245,158,11,0.25)', icon: null },
-  missed:    { label: 'Missed/Rejected', color: '#CC3333', bg: 'rgba(204,51,51,0.12)', glow: 'rgba(204,51,51,0.25)', icon: '✕' },
+  ended:     { label: 'Ended',    color: '#22C55E', bg: 'rgba(34,197,94,0.12)',  glow: 'rgba(34,197,94,0.25)',  icon: '✓' },
+  ongoing:   { label: 'In a call',color: '#3399CC', bg: 'rgba(51,153,204,0.12)', glow: 'rgba(51,153,204,0.30)', icon: null },
+  initiated: { label: 'Ringing',  color: '#F59E0B', bg: 'rgba(245,158,11,0.12)', glow: 'rgba(245,158,11,0.25)', icon: null },
+  missed:    { label: 'Missed',   color: '#CC3333', bg: 'rgba(204,51,51,0.12)',  glow: 'rgba(204,51,51,0.25)',  icon: '✕' },
+  rejected:  { label: 'Rejected', color: '#F97316', bg: 'rgba(249,115,22,0.12)', glow: 'rgba(249,115,22,0.25)', icon: '✕' },
 }
 
 function CallStatusBadge({ status }) {
   const cfg = STATUS_CONFIG[status] || STATUS_CONFIG.ended
   const isOngoing = status === 'ongoing'
   const isRinging = status === 'initiated'
-  const isMissed = status === 'missed'
+  const isMissed = status === 'missed' || status === 'rejected'
   const isEnded = status === 'ended'
 
   return (
@@ -94,20 +97,36 @@ function formatDuration(seconds) {
   return `${s}s`
 }
 
-function CallRow({ call, currentUserId, index }) {
+function CallRow({ call, currentUserId, index, onOpenChat }) {
   const isVideo = call.type === 'video'
   const TypeIcon = isVideo ? VideoCameraIcon : PhoneIcon
   const isInitiator = call.initiator?.id === currentUserId
-  const isMissed = call.status === 'missed'
 
-  const DirectionIcon = isMissed
+  // Derive missed vs rejected from participant statuses
+  let effectiveStatus = call.status
+  if (call.status === 'missed') {
+    const myParticipant = call.participants?.find((p) => p.user_id === currentUserId)
+    const otherParticipant = call.participants?.find((p) => p.user_id !== currentUserId)
+    const rejectedStatus = isInitiator
+      ? otherParticipant?.status === 'rejected'
+      : myParticipant?.status === 'rejected'
+    if (rejectedStatus) effectiveStatus = 'rejected'
+  }
+
+  const isMissed = effectiveStatus === 'missed'
+  const isRejected = effectiveStatus === 'rejected'
+  const isNotAnswered = isMissed || isRejected
+
+  const DirectionIcon = isNotAnswered
     ? PhoneXMarkIcon
     : isInitiator
     ? PhoneArrowUpRightIcon
     : PhoneArrowDownLeftIcon
 
   const directionLabel = isMissed
-    ? 'Missed/Rejected'
+    ? 'Missed'
+    : isRejected
+    ? 'Rejected'
     : isInitiator
     ? 'Outgoing'
     : 'Incoming'
@@ -131,8 +150,9 @@ function CallRow({ call, currentUserId, index }) {
 
   return (
     <div
-      className="flex items-center gap-4 px-5 py-4 hover:bg-cn-gray-100 transition-all duration-200 animate-cn-fade-up"
+      className="flex items-center gap-4 px-5 py-4 hover:bg-cn-gray-100 transition-all duration-200 animate-cn-fade-up cursor-pointer"
       style={{ animationDelay: `${index * 40}ms` }}
+      onClick={() => call.conversation?.id && onOpenChat(call.conversation.id)}
     >
       {/* Type icon */}
       <div
@@ -163,9 +183,9 @@ function CallRow({ call, currentUserId, index }) {
           <p className="text-xs text-cn-gray-400 truncate flex items-center gap-1">
             <DirectionIcon
               className="w-3 h-3 flex-shrink-0"
-              style={{ color: isMissed ? 'var(--cn-red)' : undefined }}
+              style={{ color: isNotAnswered ? 'var(--cn-red)' : undefined }}
             />
-            <span style={{ color: isMissed ? 'var(--cn-red)' : undefined }}>
+            <span style={{ color: isNotAnswered ? 'var(--cn-red)' : undefined }}>
               {directionLabel}
             </span>
             <span>· {isVideo ? 'Video' : 'Audio'}</span>
@@ -204,7 +224,7 @@ function CallRow({ call, currentUserId, index }) {
 
       {/* Status */}
       <div className="w-24 flex-shrink-0">
-        <CallStatusBadge status={call.status} />
+        <CallStatusBadge status={effectiveStatus} />
       </div>
 
       {/* Duration */}
@@ -229,6 +249,7 @@ function CallRow({ call, currentUserId, index }) {
 
 export default function CallHistoryPage() {
   const { user } = useAuth()
+  const navigate = useNavigate()
   const [page, setPage] = useState(1)
   const limit = 15
 
@@ -290,9 +311,14 @@ export default function CallHistoryPage() {
             </p>
           </div>
         </div>
-        <div className="relative z-10 opacity-70">
-          <Logo size="sm" showText={false} />
-        </div>
+        <button
+          type="button"
+          onClick={() => navigate('/')}
+          className="relative z-10 p-2 rounded-lg text-white/70 hover:text-white hover:bg-white/15 transition-all duration-200"
+          title="Close"
+        >
+          <XMarkIcon className="w-5 h-5" />
+        </button>
       </div>
 
       {/* Content */}
@@ -365,6 +391,7 @@ export default function CallHistoryPage() {
                   call={call}
                   currentUserId={user?.id}
                   index={i}
+                  onOpenChat={(convId) => navigate(`/chat/${convId}`)}
                 />
               ))}
             </div>

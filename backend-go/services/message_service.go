@@ -2,6 +2,7 @@ package services
 
 import (
 	"errors"
+	"sort"
 	"strings"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/orgchat/backend/models"
 	ws "github.com/orgchat/backend/websocket"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type MessageService struct {
@@ -17,9 +19,11 @@ type MessageService struct {
 
 type ConversationListItem struct {
 	models.Conversation
-	LastMessage  *models.Message `json:"last_message"`
-	UnreadCount  int64           `json:"unread_count"`
-	MemberCount  int             `json:"member_count"`
+	LastMessage *models.Message `json:"last_message"`
+	UnreadCount int64           `json:"unread_count"`
+	MemberCount int             `json:"member_count"`
+	IsMember    bool            `json:"is_member"`
+	ArchivedAt  *time.Time      `json:"archived_at"`
 }
 
 type MessageListResponse struct {
@@ -48,13 +52,19 @@ func (s *MessageService) getMemberRole(convID, userID string) string {
 	return member.Role
 }
 
-func (s *MessageService) GetUserConversations(userID string) ([]ConversationListItem, error) {
-	// find all conversation IDs for the user
+func (s *MessageService) GetUserConversations(userID string, archived bool) ([]ConversationListItem, error) {
 	var memberRows []models.ConversationMember
-	database.DB.Where("user_id = ?", userID).Find(&memberRows)
+	if archived {
+		database.DB.Where("user_id = ? AND archived_at IS NOT NULL", userID).Find(&memberRows)
+	} else {
+		database.DB.Where("user_id = ? AND archived_at IS NULL", userID).Find(&memberRows)
+	}
 
+	memberConvIDs := map[string]bool{}
 	var result []ConversationListItem
+
 	for _, m := range memberRows {
+		memberConvIDs[m.ConversationID] = true
 		var conv models.Conversation
 		if err := database.DB.Preload("Members.User").First(&conv, "id = ?", m.ConversationID).Error; err != nil {
 			continue
@@ -63,9 +73,10 @@ func (s *MessageService) GetUserConversations(userID string) ([]ConversationList
 		item := ConversationListItem{
 			Conversation: conv,
 			MemberCount:  len(conv.Members),
+			IsMember:     true,
+			ArchivedAt:   m.ArchivedAt,
 		}
 
-		// last message
 		var lastMsg models.Message
 		if err := database.DB.Where("conversation_id = ? AND is_deleted = ?", conv.ID, false).
 			Order("created_at DESC").
@@ -74,18 +85,77 @@ func (s *MessageService) GetUserConversations(userID string) ([]ConversationList
 			item.LastMessage = &lastMsg
 		}
 
-		// unread count: messages not read by this user
 		database.DB.Model(&models.Message{}).
-			Where("conversation_id = ? AND sender_id != ? AND id NOT IN (?)",
-				conv.ID, userID,
-				database.DB.Model(&models.MessageReceipt{}).
-					Select("message_id").
-					Where("user_id = ? AND status = ?", userID, "read"),
-			).Count(&item.UnreadCount)
+			Joins("LEFT JOIN message_receipts ON message_receipts.message_id = messages.id AND message_receipts.user_id = ? AND message_receipts.status = ?", userID, "read").
+			Where("messages.conversation_id = ? AND messages.sender_id != ? AND message_receipts.message_id IS NULL", conv.ID, userID).
+			Count(&item.UnreadCount)
 
 		result = append(result, item)
 	}
+
+	// Non-archived view: also include public groups the user has not yet joined
+	if !archived {
+		var publicGroups []models.Conversation
+		database.DB.Preload("Members.User").
+			Where("type = ? AND is_private = ?", "group", false).
+			Find(&publicGroups)
+
+		for _, conv := range publicGroups {
+			if memberConvIDs[conv.ID] {
+				continue
+			}
+			result = append(result, ConversationListItem{
+				Conversation: conv,
+				MemberCount:  len(conv.Members),
+				IsMember:     false,
+			})
+		}
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		ti := result[i].CreatedAt
+		if result[i].LastMessage != nil {
+			ti = result[i].LastMessage.CreatedAt
+		}
+		tj := result[j].CreatedAt
+		if result[j].LastMessage != nil {
+			tj = result[j].LastMessage.CreatedAt
+		}
+		return ti.After(tj)
+	})
+
 	return result, nil
+}
+
+func (s *MessageService) ClearConversation(convID, userID string) error {
+	if err := s.requireMember(convID, userID); err != nil {
+		return err
+	}
+	deletedContent := "This message was deleted"
+	return database.DB.Model(&models.Message{}).
+		Where("conversation_id = ? AND is_deleted = ?", convID, false).
+		Updates(map[string]interface{}{"is_deleted": true, "content": deletedContent}).Error
+}
+
+func (s *MessageService) ArchiveConversation(convID, userID string) error {
+	now := time.Now()
+	result := database.DB.Model(&models.ConversationMember{}).
+		Where("conversation_id = ? AND user_id = ?", convID, userID).
+		Update("archived_at", now)
+	if result.RowsAffected == 0 {
+		return errors.New("not a member of this conversation")
+	}
+	return result.Error
+}
+
+func (s *MessageService) UnarchiveConversation(convID, userID string) error {
+	result := database.DB.Model(&models.ConversationMember{}).
+		Where("conversation_id = ? AND user_id = ?", convID, userID).
+		Update("archived_at", nil)
+	if result.RowsAffected == 0 {
+		return errors.New("not a member of this conversation")
+	}
+	return result.Error
 }
 
 func (s *MessageService) GetConversation(convID, userID string) (*models.Conversation, error) {
@@ -99,11 +169,11 @@ func (s *MessageService) GetConversation(convID, userID string) (*models.Convers
 	return &conv, nil
 }
 
-func (s *MessageService) CreateConversation(creatorID string, convType string, userIDs []string, name, avatarURL *string) (*models.Conversation, error) {
+func (s *MessageService) CreateConversation(creatorID string, convType string, userIDs []string, name, avatarURL *string, isPrivate bool) (*models.Conversation, error) {
 	if convType == "direct" {
 		return s.getOrCreateDM(creatorID, userIDs)
 	}
-	return s.createGroup(creatorID, userIDs, name, avatarURL)
+	return s.createGroup(creatorID, userIDs, name, avatarURL, isPrivate)
 }
 
 func (s *MessageService) getOrCreateDM(creatorID string, userIDs []string) (*models.Conversation, error) {
@@ -142,10 +212,19 @@ func (s *MessageService) getOrCreateDM(creatorID string, userIDs []string) (*mod
 	// create new DM
 	conv := &models.Conversation{Type: "direct", CreatedByID: creatorID}
 	tx := database.DB.Begin()
-	tx.Create(conv)
-	tx.Create(&models.ConversationMember{ConversationID: conv.ID, UserID: creatorID, Role: "admin"})
+	if err := tx.Create(conv).Error; err != nil {
+		tx.Rollback()
+		return nil, err
+	}
+	if err := tx.Create(&models.ConversationMember{ConversationID: conv.ID, UserID: creatorID, Role: "admin"}).Error; err != nil {
+		tx.Rollback()
+		return nil, err
+	}
 	if otherID != creatorID {
-		tx.Create(&models.ConversationMember{ConversationID: conv.ID, UserID: otherID, Role: "member"})
+		if err := tx.Create(&models.ConversationMember{ConversationID: conv.ID, UserID: otherID, Role: "member"}).Error; err != nil {
+			tx.Rollback()
+			return nil, err
+		}
 	}
 	if err := tx.Commit().Error; err != nil {
 		tx.Rollback()
@@ -155,10 +234,21 @@ func (s *MessageService) getOrCreateDM(creatorID string, userIDs []string) (*mod
 	return conv, nil
 }
 
-func (s *MessageService) createGroup(creatorID string, userIDs []string, name, avatarURL *string) (*models.Conversation, error) {
+func (s *MessageService) createGroup(creatorID string, userIDs []string, name, avatarURL *string, isPrivate bool) (*models.Conversation, error) {
 	if name == nil || *name == "" {
 		return nil, errors.New("group name is required")
 	}
+
+	// For public groups, add every user in the system automatically
+	if !isPrivate {
+		var allUsers []models.User
+		database.DB.Select("id").Find(&allUsers)
+		userIDs = make([]string, 0, len(allUsers))
+		for _, u := range allUsers {
+			userIDs = append(userIDs, u.ID)
+		}
+	}
+
 	// collect unique members (exclude creator, they are added separately)
 	seen := map[string]bool{creatorID: true}
 	var members []string
@@ -168,16 +258,25 @@ func (s *MessageService) createGroup(creatorID string, userIDs []string, name, a
 			members = append(members, id)
 		}
 	}
-	if len(members) < 1 {
-		return nil, errors.New("group requires at least 2 members")
+	if isPrivate && len(members) < 1 {
+		return nil, errors.New("private group requires at least 1 other member")
 	}
 
-	conv := &models.Conversation{Type: "group", Name: name, AvatarURL: avatarURL, CreatedByID: creatorID}
+	conv := &models.Conversation{Type: "group", Name: name, AvatarURL: avatarURL, IsPrivate: isPrivate, CreatedByID: creatorID}
 	tx := database.DB.Begin()
-	tx.Create(conv)
-	tx.Create(&models.ConversationMember{ConversationID: conv.ID, UserID: creatorID, Role: "admin"})
+	if err := tx.Create(conv).Error; err != nil {
+		tx.Rollback()
+		return nil, err
+	}
+	if err := tx.Create(&models.ConversationMember{ConversationID: conv.ID, UserID: creatorID, Role: "admin"}).Error; err != nil {
+		tx.Rollback()
+		return nil, err
+	}
 	for _, uid := range members {
-		tx.Create(&models.ConversationMember{ConversationID: conv.ID, UserID: uid, Role: "member"})
+		if err := tx.Create(&models.ConversationMember{ConversationID: conv.ID, UserID: uid, Role: "member"}).Error; err != nil {
+			tx.Rollback()
+			return nil, err
+		}
 	}
 	if err := tx.Commit().Error; err != nil {
 		tx.Rollback()
@@ -191,7 +290,7 @@ func (s *MessageService) UpdateConversation(convID, userID string, updates map[s
 	if s.getMemberRole(convID, userID) != "admin" {
 		return nil, errors.New("only admins can update the conversation")
 	}
-	allowed := []string{"name", "avatar_url"}
+	allowed := []string{"name", "avatar_url", "is_private", "mention_permission", "waiting_room_enabled"}
 	filtered := make(map[string]interface{})
 	for _, k := range allowed {
 		if v, ok := updates[k]; ok {
@@ -220,6 +319,13 @@ func (s *MessageService) AddMembers(convID, adminID string, userIDs []string) er
 }
 
 func (s *MessageService) JoinConversation(convID, userID string) error {
+	var conv models.Conversation
+	if err := database.DB.First(&conv, "id = ?", convID).Error; err != nil {
+		return errors.New("conversation not found")
+	}
+	if conv.IsPrivate {
+		return errors.New("cannot join a private group")
+	}
 	var existing models.ConversationMember
 	if database.DB.Where("conversation_id = ? AND user_id = ?", convID, userID).First(&existing).Error == nil {
 		return nil
@@ -235,14 +341,53 @@ func (s *MessageService) RemoveMember(convID, requesterID, targetUserID string) 
 	return database.DB.Where("conversation_id = ? AND user_id = ?", convID, targetUserID).Delete(&models.ConversationMember{}).Error
 }
 
+func (s *MessageService) GetMessagesAroundDate(convID, userID string, after time.Time) (*MessageListResponse, error) {
+	if err := s.requireMember(convID, userID); err != nil {
+		return nil, err
+	}
+
+	var messages []models.Message
+	database.DB.Where("conversation_id = ? AND thread_parent_id IS NULL AND created_at >= ?", convID, after).
+		Preload("Sender").
+		Preload("Receipts").
+		Preload("ReplyTo", func(db *gorm.DB) *gorm.DB {
+			return db.Preload("Sender")
+		}).
+		Preload("ThreadReplies", func(db *gorm.DB) *gorm.DB {
+			return db.Order("created_at ASC").Preload("Sender")
+		}).
+		Order("created_at ASC").
+		Limit(51).
+		Find(&messages)
+
+	hasMore := len(messages) > 50
+	if hasMore {
+		messages = messages[:50]
+	}
+
+	var nextCursor *string
+	if hasMore && len(messages) > 0 {
+		id := messages[len(messages)-1].ID
+		nextCursor = &id
+	}
+
+	return &MessageListResponse{Messages: messages, NextCursor: nextCursor, HasMore: hasMore}, nil
+}
+
 func (s *MessageService) GetMessages(convID, userID string, beforeID *string, limit int) (*MessageListResponse, error) {
 	if err := s.requireMember(convID, userID); err != nil {
 		return nil, err
 	}
 
-	query := database.DB.Where("conversation_id = ?", convID).
+	query := database.DB.Where("conversation_id = ? AND thread_parent_id IS NULL", convID).
 		Preload("Sender").
 		Preload("Receipts").
+		Preload("ReplyTo", func(db *gorm.DB) *gorm.DB {
+			return db.Preload("Sender")
+		}).
+		Preload("ThreadReplies", func(db *gorm.DB) *gorm.DB {
+			return db.Order("created_at ASC").Preload("Sender")
+		}).
 		Order("created_at DESC").
 		Limit(limit + 1)
 
@@ -272,8 +417,8 @@ func (s *MessageService) GetMessages(convID, userID string, beforeID *string, li
 		messages[i], messages[j] = messages[j], messages[i]
 	}
 
-	// mark messages as delivered
-	s.markDelivered(convID, userID)
+	// mark messages as delivered without blocking the response
+	go s.markDelivered(convID, userID)
 
 	return &MessageListResponse{Messages: messages, NextCursor: nextCursor, HasMore: hasMore}, nil
 }
@@ -289,17 +434,21 @@ func (s *MessageService) markDelivered(convID, userID string) {
 				Where("user_id = ?", userID),
 		).Find(&msgIDs)
 
+	if len(msgIDs) == 0 {
+		return
+	}
+
 	now := time.Now()
+	receipts := make([]models.MessageReceipt, 0, len(msgIDs))
 	for _, id := range msgIDs {
-		receipt := &models.MessageReceipt{
+		receipts = append(receipts, models.MessageReceipt{
 			MessageID: id,
 			UserID:    userID,
 			Status:    "delivered",
 			Timestamp: now,
-		}
-		database.DB.Where(models.MessageReceipt{MessageID: id, UserID: userID}).
-			FirstOrCreate(receipt)
+		})
 	}
+	database.DB.Clauses(clause.OnConflict{DoNothing: true}).Create(&receipts)
 }
 
 func (s *MessageService) MarkAllDelivered(userID string) {
@@ -310,7 +459,7 @@ func (s *MessageService) MarkAllDelivered(userID string) {
 	}
 }
 
-func (s *MessageService) CreateMessage(convID, senderID, msgType string, content, fileURL, fileName *string, fileSize *int64, replyToID *string) (*models.Message, error) {
+func (s *MessageService) CreateMessage(convID, senderID, msgType string, content, fileURL, fileName *string, fileSize *int64, replyToID *string, threadParentID *string) (*models.Message, error) {
 	if err := s.requireMember(convID, senderID); err != nil {
 		return nil, err
 	}
@@ -324,6 +473,7 @@ func (s *MessageService) CreateMessage(convID, senderID, msgType string, content
 		FileName:       fileName,
 		FileSize:       fileSize,
 		ReplyToID:      replyToID,
+		ThreadParentID: threadParentID,
 	}
 
 	if err := database.DB.Create(msg).Error; err != nil {
@@ -341,8 +491,55 @@ func (s *MessageService) CreateMessage(convID, senderID, msgType string, content
 		}
 	}
 
-	database.DB.Preload("Sender").Preload("Receipts").First(msg, "id = ?", msg.ID)
+	database.DB.Preload("Sender").Preload("Receipts").Preload("ReplyTo", func(db *gorm.DB) *gorm.DB {
+		return db.Preload("Sender")
+	}).First(msg, "id = ?", msg.ID)
+
+	// Handle @here / @channel broadcast mentions
+	if content != nil && threadParentID == nil {
+		s.processMentionBroadcast(convID, senderID, *content, msg, members)
+	}
+
 	return msg, nil
+}
+
+func (s *MessageService) processMentionBroadcast(convID, senderID, content string, msg *models.Message, members []models.ConversationMember) {
+	hasChannel := strings.Contains(content, "@channel")
+	hasHere := strings.Contains(content, "@here")
+	if !hasChannel && !hasHere {
+		return
+	}
+
+	// Enforce mention permission — admins_only blocks non-admins
+	var conv models.Conversation
+	if err := database.DB.First(&conv, "id = ?", convID).Error; err != nil {
+		return
+	}
+	if conv.MentionPermission == "admins_only" && s.getMemberRole(convID, senderID) != "admin" {
+		return
+	}
+
+	payload := map[string]interface{}{
+		"message_id":      msg.ID,
+		"conversation_id": convID,
+		"sender_id":       senderID,
+		"mention_type":    "channel",
+	}
+
+	for _, m := range members {
+		if m.UserID == senderID {
+			continue
+		}
+		if hasHere && !s.WS.IsOnline(m.UserID) {
+			continue // @here only pings online members
+		}
+		if hasChannel {
+			payload["mention_type"] = "channel"
+		} else {
+			payload["mention_type"] = "here"
+		}
+		s.WS.SendToUser(m.UserID, "message:mention_all", payload)
+	}
 }
 
 func (s *MessageService) EditMessage(msgID, senderID, newContent string) (*models.Message, error) {
@@ -359,6 +556,9 @@ func (s *MessageService) EditMessage(msgID, senderID, newContent string) (*model
 	if msg.Type != "text" {
 		return nil, errors.New("only text messages can be edited")
 	}
+	if time.Since(msg.CreatedAt) > 10*time.Minute {
+		return nil, errors.New("message can no longer be edited")
+	}
 	database.DB.Model(&msg).Updates(map[string]interface{}{"content": newContent, "is_edited": true})
 	database.DB.Preload("Sender").Preload("Receipts").First(&msg, "id = ?", msgID)
 	return &msg, nil
@@ -372,6 +572,10 @@ func (s *MessageService) DeleteMessage(msgID, requesterID string) (*models.Messa
 	role := s.getMemberRole(msg.ConversationID, requesterID)
 	if msg.SenderID != requesterID && role != "admin" {
 		return nil, errors.New("permission denied")
+	}
+	// time window applies only to own deletes; admins can always delete
+	if msg.SenderID == requesterID && time.Since(msg.CreatedAt) > 30*time.Minute {
+		return nil, errors.New("message can no longer be deleted")
 	}
 	deletedContent := "This message was deleted"
 	database.DB.Model(&msg).Updates(map[string]interface{}{"is_deleted": true, "content": deletedContent})
@@ -438,13 +642,20 @@ func (s *MessageService) SearchMessages(convID, userID, query string) ([]models.
 var imageExts = map[string]bool{".jpg": true, ".jpeg": true, ".png": true, ".gif": true, ".webp": true}
 var docExts = map[string]bool{".pdf": true, ".doc": true, ".docx": true, ".xls": true, ".xlsx": true, ".ppt": true, ".pptx": true, ".txt": true, ".csv": true}
 
-func (s *MessageService) GetAttachments(convID, userID string) (*AttachmentsResponse, error) {
+func (s *MessageService) GetAttachments(convID, userID string, page, limit int) (*AttachmentsResponse, error) {
 	if err := s.requireMember(convID, userID); err != nil {
 		return nil, err
 	}
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	offset := (page - 1) * limit
 	var msgs []models.Message
 	database.DB.Where("conversation_id = ? AND is_deleted = ?", convID, false).
 		Where("file_url IS NOT NULL OR file_name IS NOT NULL OR content LIKE ?", "%http%").
+		Order("created_at DESC").
+		Offset(offset).
+		Limit(limit).
 		Find(&msgs)
 
 	resp := &AttachmentsResponse{}
@@ -468,10 +679,173 @@ func (s *MessageService) GetAttachments(convID, userID string) (*AttachmentsResp
 	return resp, nil
 }
 
+func (s *MessageService) GetThreadReplies(messageID, userID string) ([]models.Message, error) {
+	var parent models.Message
+	if err := database.DB.First(&parent, "id = ?", messageID).Error; err != nil {
+		return nil, errors.New("message not found")
+	}
+	if err := s.requireMember(parent.ConversationID, userID); err != nil {
+		return nil, err
+	}
+	var replies []models.Message
+	database.DB.Where("thread_parent_id = ?", messageID).
+		Preload("Sender").
+		Preload("Receipts").
+		Order("created_at ASC").
+		Find(&replies)
+	return replies, nil
+}
+
 func getExt(path string) string {
 	idx := strings.LastIndex(path, ".")
 	if idx < 0 {
 		return ""
 	}
 	return path[idx:]
+}
+
+func (s *MessageService) GetMessageConvID(messageID string) (string, error) {
+	var msg models.Message
+	if err := database.DB.Select("conversation_id").First(&msg, "id = ?", messageID).Error; err != nil {
+		return "", errors.New("message not found")
+	}
+	return msg.ConversationID, nil
+}
+
+// --- Reactions ---
+
+func (s *MessageService) ReactToMessage(messageID, userID, emoji string) ([]models.MessageReaction, error) {
+	var msg models.Message
+	if err := database.DB.First(&msg, "id = ?", messageID).Error; err != nil {
+		return nil, errors.New("message not found")
+	}
+	if err := s.requireMember(msg.ConversationID, userID); err != nil {
+		return nil, err
+	}
+
+	var existing models.MessageReaction
+	err := database.DB.Where("message_id = ? AND user_id = ? AND emoji = ?", messageID, userID, emoji).First(&existing).Error
+	if err == nil {
+		// already reacted — toggle off
+		database.DB.Delete(&existing)
+	} else {
+		database.DB.Create(&models.MessageReaction{MessageID: messageID, UserID: userID, Emoji: emoji})
+	}
+
+	var reactions []models.MessageReaction
+	database.DB.Where("message_id = ?", messageID).Preload("User").Find(&reactions)
+	return reactions, nil
+}
+
+// --- Pinning ---
+
+func (s *MessageService) PinMessage(convID, messageID, userID string) (*models.PinnedMessage, error) {
+	if err := s.requireMember(convID, userID); err != nil {
+		return nil, err
+	}
+	var msg models.Message
+	if err := database.DB.First(&msg, "id = ? AND conversation_id = ?", messageID, convID).Error; err != nil {
+		return nil, errors.New("message not found in this conversation")
+	}
+
+	var existing models.PinnedMessage
+	if database.DB.Where("message_id = ?", messageID).First(&existing).Error == nil {
+		return &existing, nil // already pinned
+	}
+
+	pin := &models.PinnedMessage{
+		ConversationID: convID,
+		MessageID:      messageID,
+		PinnedByID:     userID,
+	}
+	if err := database.DB.Create(pin).Error; err != nil {
+		return nil, err
+	}
+	database.DB.Preload("Message.Sender").Preload("PinnedBy").First(pin, "id = ?", pin.ID)
+	return pin, nil
+}
+
+func (s *MessageService) UnpinMessage(convID, messageID, userID string) error {
+	if err := s.requireMember(convID, userID); err != nil {
+		return err
+	}
+	return database.DB.Where("conversation_id = ? AND message_id = ?", convID, messageID).Delete(&models.PinnedMessage{}).Error
+}
+
+func (s *MessageService) GetPinnedMessages(convID, userID string) ([]models.PinnedMessage, error) {
+	if err := s.requireMember(convID, userID); err != nil {
+		return nil, err
+	}
+	var pins []models.PinnedMessage
+	database.DB.Where("conversation_id = ?", convID).
+		Preload("Message.Sender").
+		Preload("PinnedBy").
+		Order("pinned_at DESC").
+		Find(&pins)
+	return pins, nil
+}
+
+// --- Scheduled Messages ---
+
+func (s *MessageService) CreateScheduledMessage(convID, senderID, msgType string, content, fileURL, fileName *string, fileSize *int64, scheduledAt time.Time) (*models.ScheduledMessage, error) {
+	if err := s.requireMember(convID, senderID); err != nil {
+		return nil, err
+	}
+	if scheduledAt.Before(time.Now().Add(30 * time.Second)) {
+		return nil, errors.New("scheduled time must be at least 30 seconds in the future")
+	}
+	sm := &models.ScheduledMessage{
+		ConversationID: convID,
+		SenderID:       senderID,
+		Type:           msgType,
+		Content:        content,
+		FileURL:        fileURL,
+		FileName:       fileName,
+		FileSize:       fileSize,
+		ScheduledAt:    scheduledAt,
+	}
+	if err := database.DB.Create(sm).Error; err != nil {
+		return nil, err
+	}
+	return sm, nil
+}
+
+func (s *MessageService) GetScheduledMessages(convID, userID string) ([]models.ScheduledMessage, error) {
+	if err := s.requireMember(convID, userID); err != nil {
+		return nil, err
+	}
+	var msgs []models.ScheduledMessage
+	database.DB.Where("conversation_id = ? AND sender_id = ? AND sent = ?", convID, userID, false).
+		Order("scheduled_at ASC").
+		Find(&msgs)
+	return msgs, nil
+}
+
+func (s *MessageService) DeleteScheduledMessage(id, userID string) error {
+	var sm models.ScheduledMessage
+	if err := database.DB.First(&sm, "id = ?", id).Error; err != nil {
+		return errors.New("scheduled message not found")
+	}
+	if sm.SenderID != userID {
+		return errors.New("permission denied")
+	}
+	if sm.Sent {
+		return errors.New("message already sent")
+	}
+	return database.DB.Delete(&sm).Error
+}
+
+func (s *MessageService) ProcessScheduledMessages() []models.Message {
+	var due []models.ScheduledMessage
+	database.DB.Where("sent = ? AND scheduled_at <= ?", false, time.Now()).Find(&due)
+
+	var sent []models.Message
+	for _, sm := range due {
+		msg, err := s.CreateMessage(sm.ConversationID, sm.SenderID, sm.Type, sm.Content, sm.FileURL, sm.FileName, sm.FileSize, nil, nil)
+		if err == nil {
+			sent = append(sent, *msg)
+		}
+		database.DB.Model(&sm).Update("sent", true)
+	}
+	return sent
 }
