@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"encoding/json"
+	"log"
 	"sync"
 	"time"
 
@@ -20,24 +21,20 @@ type connEntry struct {
 	mu   sync.Mutex
 }
 
+// writeWait bounds every write (data frames and keepalive pings) so a stuck
+// socket can't block a writer indefinitely.
+const writeWait = 10 * time.Second
+
 type Manager struct {
 	mu          sync.RWMutex
 	connections map[string]map[*websocket.Conn]*connEntry
 	callTimers  map[string]*time.Timer
-
-	// iceBufMu protects iceBuffers. Key is "callID:recipientUserID".
-	// Candidates from joined participants (e.g. the caller) are buffered for
-	// participants who have not yet answered so that the callee's peer
-	// connection is fully configured before it receives candidates.
-	iceBufMu   sync.Mutex
-	iceBuffers map[string][]map[string]interface{}
 }
 
 func NewManager() *Manager {
 	return &Manager{
 		connections: make(map[string]map[*websocket.Conn]*connEntry),
 		callTimers:  make(map[string]*time.Timer),
-		iceBuffers:  make(map[string][]map[string]interface{}),
 	}
 }
 
@@ -93,7 +90,11 @@ func (m *Manager) SendToUser(userID, eventType string, data interface{}) {
 	for _, e := range entries {
 		// Serialize writes per connection; Gorilla WebSocket forbids concurrent writers.
 		e.mu.Lock()
-		_ = e.conn.WriteMessage(websocket.TextMessage, payload)
+		e.conn.SetWriteDeadline(time.Now().Add(writeWait))
+		if err := e.conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+			log.Printf("ws: failed to send %q to user %s: %v", eventType, userID, err)
+			e.conn.Close()
+		}
 		e.mu.Unlock()
 	}
 }
@@ -132,38 +133,55 @@ func (m *Manager) CancelCallTimer(callID string) {
 	}
 }
 
-func iceKey(callID, recipientID string) string { return callID + ":" + recipientID }
-
-// BufferICECandidate stores a candidate payload for a recipient who has not
-// yet joined the call. The payload must be the full map that would be sent
-// as the event data (including user_id, candidate, etc.).
-func (m *Manager) BufferICECandidate(callID, recipientID string, payload map[string]interface{}) {
-	m.iceBufMu.Lock()
-	defer m.iceBufMu.Unlock()
-	key := iceKey(callID, recipientID)
-	m.iceBuffers[key] = append(m.iceBuffers[key], payload)
+// SendToConn delivers an event to a single WebSocket connection of a user
+// (rather than every tab). The SFU uses this to route an offer / ICE candidate
+// back to the exact connection that owns the peer.
+func (m *Manager) SendToConn(userID string, conn *websocket.Conn, eventType string, data interface{}) {
+	m.mu.RLock()
+	entry := m.connections[userID][conn]
+	m.mu.RUnlock()
+	if entry == nil {
+		return
+	}
+	payload, _ := json.Marshal(Event{Type: eventType, Data: data})
+	entry.mu.Lock()
+	entry.conn.SetWriteDeadline(time.Now().Add(writeWait))
+	if err := entry.conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+		log.Printf("ws: failed to send %q to a connection of user %s: %v", eventType, userID, err)
+		entry.conn.Close()
+	}
+	entry.mu.Unlock()
 }
 
-// FlushICECandidates returns and removes all buffered candidates for a
-// recipient, so the caller can deliver them now that the recipient has joined.
-func (m *Manager) FlushICECandidates(callID, recipientID string) []map[string]interface{} {
-	m.iceBufMu.Lock()
-	defer m.iceBufMu.Unlock()
-	key := iceKey(callID, recipientID)
-	buffered := m.iceBuffers[key]
-	delete(m.iceBuffers, key)
-	return buffered
+// PingConn sends a WebSocket ping under the same per-connection lock as every
+// other write. Without this the keepalive goroutine would write concurrently with
+// SendToUser/SendToConn (Gorilla forbids concurrent writers), corrupting the frame
+// stream — which drops the socket ~1 ping interval into a busy call.
+func (m *Manager) PingConn(userID string, conn *websocket.Conn) error {
+	m.mu.RLock()
+	entry := m.connections[userID][conn]
+	m.mu.RUnlock()
+	if entry == nil {
+		return nil
+	}
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	conn.SetWriteDeadline(time.Now().Add(writeWait))
+	return conn.WriteMessage(websocket.PingMessage, nil)
 }
 
-// ClearCallICEBuffers removes all buffered candidates for every participant
-// of a call. Call this when a call ends or is rejected to avoid memory leaks.
-func (m *Manager) ClearCallICEBuffers(callID string) {
-	m.iceBufMu.Lock()
-	defer m.iceBufMu.Unlock()
-	prefix := callID + ":"
-	for key := range m.iceBuffers {
-		if len(key) > len(prefix) && key[:len(prefix)] == prefix {
-			delete(m.iceBuffers, key)
+// BroadcastPresenceChange notifies all connected users (except the target) that
+// a user's status has changed. Used after call start/end to push busy/online transitions.
+func (m *Manager) BroadcastPresenceChange(userID string, online bool, status string) {
+	payload := map[string]interface{}{
+		"user_id":   userID,
+		"online":    online,
+		"status":    status,
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+	}
+	for _, uid := range m.OnlineUsers() {
+		if uid != userID {
+			m.SendToUser(uid, "user:presence", payload)
 		}
 	}
 }

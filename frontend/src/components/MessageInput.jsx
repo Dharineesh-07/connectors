@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useRef, useState, useEffect } from 'react'
 import {
   PaperAirplaneIcon,
   PaperClipIcon,
@@ -6,18 +6,31 @@ import {
   XMarkIcon,
   MicrophoneIcon,
   StopIcon,
+  ClockIcon,
+  ChartBarIcon,
+  PencilSquareIcon,
 } from '@heroicons/react/24/outline'
 import EmojiPicker from 'emoji-picker-react'
 import { useTheme } from '../context/ThemeContext'
+import ScribblePad from './ScribblePad'
+
+const MENTION_SUGGESTIONS = [
+  { token: '@here', label: '@here', description: 'Notify all online members' },
+  { token: '@channel', label: '@channel', description: 'Notify all members' },
+]
 
 export default function MessageInput({
   onSend,
   onFileUpload,
   onVoiceMessage,
   onTyping,
+  onSchedule,
+  onCreatePoll,
   disabled,
   replyMessage,
   onCancelReply,
+  e2eeActive,
+  e2eeReady,
 }) {
   const { theme } = useTheme()
   const [text, setText] = useState('')
@@ -25,17 +38,71 @@ export default function MessageInput({
   const [uploading, setUploading] = useState(false)
   const [recording, setRecording] = useState(false)
   const [recordingSeconds, setRecordingSeconds] = useState(0)
+  const [mentionSuggestions, setMentionSuggestions] = useState([])
+  const [activeSuggestion, setActiveSuggestion] = useState(0)
+  const [showScribble, setShowScribble] = useState(false)
   const fileRef = useRef(null)
   const typingTimer = useRef(null)
   const mediaRecorderRef = useRef(null)
   const chunksRef = useRef([])
   const recordTimerRef = useRef(null)
+  const textareaRef = useRef(null)
+
+  const checkMentions = (value) => {
+    const atIdx = value.lastIndexOf('@')
+    if (atIdx === -1) { setMentionSuggestions([]); return }
+    const partial = value.slice(atIdx)
+    if (partial.includes(' ') || partial.length > 10) { setMentionSuggestions([]); return }
+    const filtered = MENTION_SUGGESTIONS.filter((s) =>
+      s.token.startsWith(partial.toLowerCase())
+    )
+    setMentionSuggestions(filtered)
+    setActiveSuggestion(0)
+  }
+
+  const insertSuggestion = (suggestion) => {
+    const atIdx = text.lastIndexOf('@')
+    const newText = text.slice(0, atIdx) + suggestion.token + ' '
+    setText(newText)
+    setMentionSuggestions([])
+    textareaRef.current?.focus()
+  }
 
   const handleChange = (e) => {
-    setText(e.target.value)
+    const value = e.target.value
+    setText(value)
+    checkMentions(value)
     if (typingTimer.current) clearTimeout(typingTimer.current)
     onTyping?.(true)
     typingTimer.current = setTimeout(() => onTyping?.(false), 2000)
+  }
+
+  const handleKey = (e) => {
+    if (mentionSuggestions.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setActiveSuggestion((v) => (v + 1) % mentionSuggestions.length)
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setActiveSuggestion((v) => (v - 1 + mentionSuggestions.length) % mentionSuggestions.length)
+        return
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault()
+        insertSuggestion(mentionSuggestions[activeSuggestion])
+        return
+      }
+      if (e.key === 'Escape') {
+        setMentionSuggestions([])
+        return
+      }
+    }
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      handleSend()
+    }
   }
 
   const handleSend = () => {
@@ -51,13 +118,6 @@ export default function MessageInput({
     onCancelReply?.()
   }
 
-  const handleKey = (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      handleSend()
-    }
-  }
-
   const handleFile = async (e) => {
     const file = e.target.files?.[0]
     if (!file) return
@@ -68,6 +128,10 @@ export default function MessageInput({
       setUploading(false)
       e.target.value = ''
     }
+  }
+
+  const handleScribbleSend = async (file) => {
+    await onFileUpload?.(file)
   }
 
   const startRecording = async () => {
@@ -115,9 +179,26 @@ export default function MessageInput({
   const formatRecordTime = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 
   const hasText = text.trim().length > 0
+  const isDisabled = disabled || (e2eeActive && !e2eeReady)
 
   return (
     <div className="relative px-4 py-3 bg-cn-white border-t border-cn-gray-200">
+      {/* E2EE status banner */}
+      {e2eeActive && (
+        <div
+          className="flex items-center justify-center gap-1.5 mb-2 text-[10px] font-semibold rounded-full py-1"
+          style={{
+            background: e2eeReady ? 'rgba(34,197,94,0.08)' : 'rgba(245,158,11,0.08)',
+            color: e2eeReady ? '#16a34a' : '#d97706',
+          }}
+        >
+          <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+            <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+            <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+          </svg>
+          {e2eeReady ? 'End-to-end encrypted' : 'Setting up encryption…'}
+        </div>
+      )}
       {/* Reply bar */}
       {replyMessage && (
         <div className="flex items-center gap-2 mb-2 px-3 py-2 rounded-lg bg-cn-gray-100 border border-cn-gray-200">
@@ -136,22 +217,55 @@ export default function MessageInput({
         </div>
       )}
 
-      <div className="flex items-end gap-2">
+      <div className="flex items-center gap-2">
         {/* Attachment */}
         <button
           onClick={() => fileRef.current?.click()}
-          disabled={disabled || uploading}
-          className="p-2 text-cn-gray-400 hover:text-cn-blue transition-fast disabled:opacity-50 flex-shrink-0"
+          disabled={isDisabled || uploading}
+          className="w-9 h-9 flex items-center justify-center text-cn-gray-400 hover:text-cn-blue transition-fast disabled:opacity-50 flex-shrink-0"
         >
           <PaperClipIcon className="w-5 h-5" />
         </button>
         <input ref={fileRef} type="file" className="hidden" onChange={handleFile} />
 
+        {/* Schedule */}
+        <button
+          onClick={onSchedule}
+          disabled={isDisabled}
+          className="w-9 h-9 flex items-center justify-center text-cn-gray-400 hover:text-cn-blue transition-fast disabled:opacity-50 flex-shrink-0"
+          title="Schedule message"
+        >
+          <ClockIcon className="w-5 h-5" />
+        </button>
+
+        {/* Scribble */}
+        <button
+          onClick={() => setShowScribble(true)}
+          disabled={isDisabled || uploading}
+          className="w-9 h-9 flex items-center justify-center text-cn-gray-400 hover:text-cn-blue transition-fast disabled:opacity-50 flex-shrink-0"
+          title="Send a scribble"
+        >
+          <PencilSquareIcon className="w-5 h-5" />
+        </button>
+
+        {/* Poll */}
+        {onCreatePoll && (
+          <button
+            onClick={onCreatePoll}
+            disabled={isDisabled}
+            className="w-9 h-9 flex items-center justify-center text-cn-gray-400 hover:text-cn-blue transition-fast disabled:opacity-50 flex-shrink-0"
+            title="Create poll"
+          >
+            <ChartBarIcon className="w-5 h-5" />
+          </button>
+        )}
+
         {/* Emoji toggle */}
         <div className="relative flex-shrink-0">
           <button
             onClick={() => setShowEmoji((v) => !v)}
-            className="p-2 text-cn-gray-400 hover:text-cn-blue transition-fast flex-shrink-0"
+            disabled={isDisabled}
+            className="w-9 h-9 flex items-center justify-center text-cn-gray-400 hover:text-cn-blue transition-fast flex-shrink-0 disabled:opacity-50"
           >
             <FaceSmileIcon className="w-5 h-5" />
           </button>
@@ -169,26 +283,41 @@ export default function MessageInput({
           )}
         </div>
 
-        {/* Textarea */}
-        <textarea
-          rows={1}
-          value={text}
-          onChange={handleChange}
-          onKeyDown={handleKey}
-          placeholder="Type a message…"
-          disabled={disabled}
-          className="flex-1 resize-none border border-cn-gray-200 bg-cn-gray-100 text-cn-gray-800 placeholder-cn-gray-400 rounded-full px-4 py-2.5 text-sm focus:outline-none focus:border-cn-blue min-h-[44px] max-h-32 overflow-y-auto transition-fast"
-          onFocus={(e) => {
-            e.target.style.borderColor = 'var(--cn-blue)'
-          }}
-          onBlur={(e) => {
-            e.target.style.borderColor = ''
-          }}
-          onInput={(e) => {
-            e.target.style.height = 'auto'
-            e.target.style.height = Math.min(e.target.scrollHeight, 128) + 'px'
-          }}
-        />
+        {/* Textarea + mention suggestions */}
+        <div className="flex-1 relative">
+          {mentionSuggestions.length > 0 && (
+            <div className="absolute bottom-full mb-2 left-0 w-72 bg-cn-white rounded-xl shadow-xl border border-cn-gray-200 overflow-hidden z-20 animate-cn-fade-up">
+              {mentionSuggestions.map((s, i) => (
+                <button
+                  key={s.token}
+                  onMouseDown={(e) => { e.preventDefault(); insertSuggestion(s) }}
+                  className={`w-full text-left px-4 py-2.5 flex items-center gap-3 transition-all ${
+                    i === activeSuggestion ? 'bg-cn-blue-light' : 'hover:bg-cn-gray-50'
+                  }`}
+                >
+                  <span className="text-base font-black text-cn-blue">{s.label}</span>
+                  <span className="text-xs text-cn-gray-400">{s.description}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          <textarea
+            ref={textareaRef}
+            rows={1}
+            value={text}
+            onChange={handleChange}
+            onKeyDown={handleKey}
+            placeholder={e2eeActive && !e2eeReady ? 'Setting up encryption…' : 'Type a message… (@here or @channel to notify)'}
+            disabled={isDisabled}
+            className="msg-input w-full resize-none border border-cn-gray-200 bg-cn-gray-100 text-cn-gray-800 placeholder-cn-gray-400 rounded-full px-4 py-2 text-sm leading-5 focus:outline-none focus:border-cn-blue min-h-[36px] max-h-32 overflow-x-hidden overflow-y-hidden transition-fast"
+            onFocus={(e) => { e.target.style.borderColor = 'var(--cn-blue)' }}
+            onBlur={(e) => { e.target.style.borderColor = '' }}
+            onInput={(e) => {
+              e.target.style.height = 'auto'
+              e.target.style.height = Math.min(e.target.scrollHeight, 128) + 'px'
+            }}
+          />
+        </div>
 
         {/* Recording timer */}
         {recording && (
@@ -201,7 +330,7 @@ export default function MessageInput({
         {hasText ? (
           <button
             onClick={handleSend}
-            disabled={disabled}
+            disabled={isDisabled}
             style={{
               background: 'linear-gradient(135deg, #CC3333 0%, #3399CC 100%)',
               boxShadow: '0 4px 12px rgba(204,51,51,0.35)',
@@ -222,7 +351,7 @@ export default function MessageInput({
         ) : (
           <button
             onClick={handleVoiceToggle}
-            disabled={disabled}
+            disabled={isDisabled}
             style={{
               background: recording
                 ? 'var(--cn-red)'
@@ -241,6 +370,13 @@ export default function MessageInput({
           </button>
         )}
       </div>
+
+      {showScribble && (
+        <ScribblePad
+          onSend={handleScribbleSend}
+          onClose={() => setShowScribble(false)}
+        />
+      )}
     </div>
   )
 }

@@ -1,29 +1,22 @@
 package services
 
 import (
-	"crypto/hmac"
-	"crypto/sha1"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"time"
 
-	"github.com/orgchat/backend/config"
 	"github.com/orgchat/backend/database"
 	"github.com/orgchat/backend/models"
 )
 
 type CallService struct{}
 
-type TURNCredentials struct {
-	URLs       []string `json:"urls"`
-	Username   string   `json:"username"`
-	Credential string   `json:"credential"`
-}
-
+// CallResponse carries the call plus the SFU room name the client should join.
+// Media flows through the WebRTC SFU (see package sfu); there is no token to
+// mint — the WebSocket connection is already authenticated.
 type CallResponse struct {
-	Call            *models.Call     `json:"call"`
-	TURNCredentials *TURNCredentials `json:"turn_credentials,omitempty"`
+	Call *models.Call `json:"call"`
+	Room string       `json:"room,omitempty"`
 }
 
 type CallListResponse struct {
@@ -34,18 +27,10 @@ type CallListResponse struct {
 	TotalPages int           `json:"total_pages"`
 }
 
-func (s *CallService) GenerateTURNCredentials(userID string) *TURNCredentials {
-	cfg := config.App
-	timestamp := time.Now().Unix() + 86400
-	username := fmt.Sprintf("%d:%s", timestamp, userID)
-	mac := hmac.New(sha1.New, []byte(cfg.TURNCredential))
-	mac.Write([]byte(username))
-	credential := base64.StdEncoding.EncodeToString(mac.Sum(nil))
-	return &TURNCredentials{
-		URLs:       []string{cfg.TURNServerURL},
-		Username:   username,
-		Credential: credential,
-	}
+// CallRoom is the SFU room name for a call. Exported so the meetings handler
+// (and callers building call:incoming events) share the exact same value.
+func CallRoom(callID string) string {
+	return "call-" + callID
 }
 
 func (s *CallService) requireMember(convID, userID string) error {
@@ -68,6 +53,33 @@ func (s *CallService) loadCall(callID string) (*models.Call, error) {
 func (s *CallService) InitiateCall(convID, initiatorID, callType string) (*CallResponse, error) {
 	if err := s.requireMember(convID, initiatorID); err != nil {
 		return nil, err
+	}
+
+	var existingCall models.Call
+	if database.DB.Where("conversation_id = ? AND status IN ?", convID, []string{"initiated", "ongoing"}).
+		First(&existingCall).Error == nil {
+		// Auto-expire stale calls.
+		// "initiated" calls are resolved within 30 s by the ring timer; anything
+		// older than 45 s is a leftover from a crashed/restarted server.
+		// Any active call (including "ongoing") older than 4 h is also stale.
+		stale := false
+		if existingCall.Status == "initiated" && time.Since(existingCall.StartedAt) > 45*time.Second {
+			stale = true
+		} else if time.Since(existingCall.StartedAt) > 4*time.Hour {
+			stale = true
+		}
+
+		if stale {
+			now := time.Now()
+			duration := int(now.Sub(existingCall.StartedAt).Seconds())
+			database.DB.Model(&existingCall).Updates(map[string]interface{}{
+				"status":           "ended",
+				"ended_at":         now,
+				"duration_seconds": duration,
+			})
+		} else {
+			return nil, fmt.Errorf("active_call:%s:a call is already active in this conversation", existingCall.ID)
+		}
 	}
 
 	call := &models.Call{
@@ -94,7 +106,7 @@ func (s *CallService) InitiateCall(convID, initiatorID, callType string) (*CallR
 			p.Status = "joined"
 			p.JoinedAt = &now
 		} else {
-			p.Status = "missed"
+			p.Status = "invited"
 			p.JoinedAt = nil
 		}
 		tx.Create(p)
@@ -108,7 +120,7 @@ func (s *CallService) InitiateCall(convID, initiatorID, callType string) (*CallR
 	if err != nil {
 		return nil, err
 	}
-	return &CallResponse{Call: loaded, TURNCredentials: s.GenerateTURNCredentials(initiatorID)}, nil
+	return &CallResponse{Call: loaded, Room: CallRoom(loaded.ID)}, nil
 }
 
 func (s *CallService) JoinCall(callID, userID string) (*CallResponse, error) {
@@ -125,6 +137,28 @@ func (s *CallService) JoinCall(callID, userID string) (*CallResponse, error) {
 
 	if err := s.requireMember(check.ConversationID, userID); err != nil {
 		return nil, err
+	}
+
+	// Check if group call has waiting room enabled (non-host goes to waiting)
+	if check.InitiatedBy != userID {
+		var conv models.Conversation
+		if database.DB.First(&conv, "id = ?", check.ConversationID).Error == nil {
+			if conv.Type == "group" && conv.WaitingRoomEnabled {
+				var p models.CallParticipant
+				result := database.DB.Where("call_id = ? AND user_id = ?", callID, userID).First(&p)
+				if result.Error != nil {
+					database.DB.Create(&models.CallParticipant{CallID: callID, UserID: userID, Status: "waiting"})
+				} else if p.Status != "joined" {
+					database.DB.Model(&p).Update("status", "waiting")
+				}
+				loaded, err := s.loadCall(callID)
+				if err != nil {
+					return nil, err
+				}
+				// Empty Room signals the client it's in the waiting room (not yet admitted).
+				return &CallResponse{Call: loaded, Room: ""}, nil
+			}
+		}
 	}
 
 	now := time.Now()
@@ -145,7 +179,31 @@ func (s *CallService) JoinCall(callID, userID string) (*CallResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &CallResponse{Call: loaded, TURNCredentials: s.GenerateTURNCredentials(userID)}, nil
+	return &CallResponse{Call: loaded, Room: CallRoom(callID)}, nil
+}
+
+func (s *CallService) AdmitFromWaiting(callID, userID string) (*CallResponse, error) {
+	var check models.Call
+	if err := database.DB.First(&check, "id = ?", callID).Error; err != nil {
+		return nil, errors.New("call not found")
+	}
+	if check.Status == "ended" {
+		return nil, errors.New("call has already ended")
+	}
+
+	now := time.Now()
+	var p models.CallParticipant
+	result := database.DB.Where("call_id = ? AND user_id = ?", callID, userID).First(&p)
+	if result.Error != nil {
+		return nil, errors.New("participant not found in waiting room")
+	}
+	database.DB.Model(&p).Updates(map[string]interface{}{"status": "joined", "joined_at": now, "left_at": nil})
+
+	loaded, err := s.loadCall(callID)
+	if err != nil {
+		return nil, err
+	}
+	return &CallResponse{Call: loaded, Room: CallRoom(callID)}, nil
 }
 
 func (s *CallService) LeaveCall(callID, userID string) (*models.Call, error) {
@@ -161,8 +219,8 @@ func (s *CallService) LeaveCall(callID, userID string) (*models.Call, error) {
 	now := time.Now()
 	if database.DB.Where("call_id = ? AND user_id = ?", callID, userID).First(&p).Error == nil {
 		newStatus := "left"
-		if p.Status == "missed" {
-			newStatus = "rejected"
+		if p.Status == "invited" || p.Status == "waiting" {
+			newStatus = "missed"
 		}
 		database.DB.Model(&p).Updates(map[string]interface{}{"left_at": now, "status": newStatus})
 	}
@@ -191,6 +249,15 @@ func (s *CallService) LeaveCall(callID, userID string) (*models.Call, error) {
 			"ended_at":         now,
 			"duration_seconds": duration,
 		})
+	} else if call.InitiatedBy == userID {
+		// The host left but the call continues. Promote the earliest-joined
+		// remaining participant to host so host-only actions (waiting-room
+		// admit/reject) keep working instead of being permanently locked out.
+		var newHost models.CallParticipant
+		if database.DB.Where("call_id = ? AND status = ? AND user_id != ?", callID, "joined", userID).
+			Order("joined_at asc").First(&newHost).Error == nil {
+			database.DB.Model(&call).Update("initiated_by", newHost.UserID)
+		}
 	}
 
 	return s.loadCall(callID)

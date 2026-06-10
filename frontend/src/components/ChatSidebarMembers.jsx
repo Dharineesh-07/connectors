@@ -9,7 +9,7 @@ import { useOnlineUsers } from '../hooks/useOnlineUsers'
 import UserAvatar from './UserAvatar'
 import toast from 'react-hot-toast'
 
-export default function ChatSidebarMembers({ conversationId, conversation, onClose }) {
+export default function ChatSidebarMembers({ conversationId, conversation, onClose, className }) {
   const [showAddModal, setShowAddModal] = useState(false)
   const [addSearch, setAddSearch] = useState('')
   const [selectedToAdd, setSelectedToAdd] = useState([])
@@ -101,7 +101,7 @@ export default function ChatSidebarMembers({ conversationId, conversation, onClo
 
   return (
     <>
-      <div className="w-80 flex flex-col bg-cn-white border-l border-cn-gray-200 h-full animate-cn-slide-in-right shadow-2xl relative z-20">
+      <div className={className ?? "w-80 flex flex-col bg-cn-white border-l border-cn-gray-200 h-full animate-cn-slide-in-right shadow-2xl relative z-20"}>
         {/* Header */}
         <div className="relative p-6 border-b border-cn-gray-100 overflow-hidden bg-cn-white">
           <div className="absolute top-0 left-0 w-full h-1 cn-gradient-brand"></div>

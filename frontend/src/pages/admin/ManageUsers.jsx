@@ -1,6 +1,7 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from 'react-query'
-import { PlusIcon } from '@heroicons/react/24/outline'
+import { PlusIcon, XMarkIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 import { listUsers, createUser, deactivateUser, resetPassword } from '../../api/admin'
 import UserTable from '../../components/admin/UserTable'
@@ -8,6 +9,7 @@ import AddUserModal from '../../components/admin/AddUserModal'
 import { useAuth } from '../../context/AuthContext'
 
 export default function ManageUsers() {
+  const navigate = useNavigate()
   const { user: me } = useAuth()
   const qc = useQueryClient()
   const [showAdd, setShowAdd] = useState(false)
@@ -64,13 +66,22 @@ export default function ManageUsers() {
             {data?.total ?? '—'} total accounts
           </p>
         </div>
-        <button
-          onClick={() => setShowAdd(true)}
-          className="flex items-center gap-2 px-4 py-2 bg-cn-red hover:bg-cn-red-dark text-white rounded-lg text-sm font-semibold transition-fast shadow-card"
-        >
-          <PlusIcon className="w-4 h-4" />
-          Add Employee
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowAdd(true)}
+            className="flex items-center gap-2 px-4 py-2 bg-cn-red hover:bg-cn-red-dark text-white rounded-lg text-sm font-semibold transition-fast shadow-card"
+          >
+            <PlusIcon className="w-4 h-4" />
+            Add Employee
+          </button>
+          <button
+            onClick={() => navigate('/admin')}
+            className="p-2 rounded-lg text-cn-gray-400 hover:text-cn-red hover:bg-cn-red-light transition-fast"
+            title="Close"
+          >
+            <XMarkIcon className="w-5 h-5" />
+          </button>
+        </div>
       </div>
 
       {isLoading ? (

@@ -437,9 +437,13 @@ The backend uses a single persistent connection per client. Messages are JSON wi
 | `message:typing` | `{conversation_id, user_id, is_typing}` | Typing indicator |
 | `user:online` | `{user_id}` | User came online |
 | `user:offline` | `{user_id}` | User went offline |
-| `call:incoming` | `{call_id, caller, type, offer_sdp}` | Incoming WebRTC call |
-| `call:answer` | `{call_id, answer_sdp}` | Callee answered |
-| `call:ice` | `{call_id, candidate}` | ICE candidate exchange |
+| `call:incoming` | `{call_id, caller, type, room}` | Incoming call ring |
+| `webrtc:join` | `{room}` | Client joins the SFU room (server then offers) |
+| `webrtc:offer` | `{room, sdp}` | SFU → client offer |
+| `webrtc:answer` | `{room, sdp}` | Client → SFU answer |
+| `webrtc:ice` | `{room, candidate}` | Trickle ICE candidate |
+| `call:roster` | `{room, participants}` | Participant list for tile labels |
+| `call:signal` | `{room, from, payload}` | In-call signals (raise hand, reactions) |
 | `call:ended` | `{call_id}` | Call was terminated |
 | `call:rejected` | `{call_id}` | Callee rejected the call |
 
@@ -480,7 +484,7 @@ A **Company Announcements** group conversation is created with all four members 
 - **Conversations** — direct messages and group chats, unread counts, cursor-based message pagination
 - **Real-time messaging** — WebSocket push, typing indicators, delivery / read receipts
 - **File sharing** — image and file uploads stored on S3 or local disk, inline previews
-- **Audio / video calls** — WebRTC peer-to-peer with TURN server support, mute, PiP local video
+- **Audio / video calls** — native WebRTC through a built-in Go SFU (group calls, screen share, raise hand, reactions), STUN/TURN support, mute, PiP local video
 - **Push notifications** — Expo push token registration, notification-tap deep-link to conversation
 - **Admin console** — stats dashboard, user enable/disable, force password reset, broadcast message, audit log
 - **Dark theme** — consistent slate-900 palette across web and mobile

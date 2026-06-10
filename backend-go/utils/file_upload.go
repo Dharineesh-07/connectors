@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,7 +22,7 @@ import (
 
 var allowedMIMETypes = map[string]bool{
 	"image/jpeg": true, "image/png": true, "image/gif": true,
-	"image/webp": true, "image/svg+xml": true,
+	"image/webp": true,
 	"application/pdf": true,
 	"application/msword": true,
 	"application/vnd.openxmlformats-officedocument.wordprocessingml.document": true,
@@ -92,7 +93,17 @@ func ValidateAndUpload(file *multipart.FileHeader, declaredMIME string) (*Upload
 	}
 
 	if len(data) >= 4 {
+		// First try magic-byte detection for binary formats.
 		detected := detectMIME(data[:min(len(data), 12)])
+		if detected == "" {
+			// Fall back to the stdlib sniffer (reads up to 512 bytes).
+			detected = http.DetectContentType(data[:min(len(data), 512)])
+			// http.DetectContentType always returns something; normalise the
+			// generic fallback so it doesn't trigger a false mismatch.
+			if detected == "application/octet-stream" {
+				detected = ""
+			}
+		}
 		if detected != "" && detected != declaredMIME {
 			return nil, errors.New("file content does not match declared type")
 		}

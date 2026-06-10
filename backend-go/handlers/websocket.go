@@ -8,15 +8,29 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"github.com/orgchat/backend/config"
 	"github.com/orgchat/backend/database"
 	"github.com/orgchat/backend/models"
 	"github.com/orgchat/backend/services"
+	"github.com/orgchat/backend/sfu"
 	"github.com/orgchat/backend/utils"
 	ws "github.com/orgchat/backend/websocket"
+	pion "github.com/pion/webrtc/v4"
 )
 
 var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
+	CheckOrigin: func(r *http.Request) bool {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return true
+		}
+		for _, allowed := range config.App.CORSOrigins {
+			if origin == allowed {
+				return true
+			}
+		}
+		return false
+	},
 }
 
 type WSHandler struct {
@@ -24,6 +38,14 @@ type WSHandler struct {
 	MsgService  *services.MessageService
 	CallService *services.CallService
 	NotifSvc    *services.NotificationService
+	SFU         *sfu.SFU
+}
+
+// callSession holds the per-connection WebRTC state: a writer that targets this
+// exact socket and the SFU peers this connection owns (one per joined room).
+type callSession struct {
+	send  sfu.SendFunc
+	peers map[string]*sfu.Peer
 }
 
 type inboundEvent struct {
@@ -55,8 +77,42 @@ func (h *WSHandler) Connect(c *gin.Context) {
 	}
 	defer conn.Close()
 
+	// Keepalive: server pings every 54 s; client must pong within 60 s or
+	// the read deadline fires and the connection is torn down. This ensures
+	// zombie connections (e.g. browser tabs suspended after hours of idle)
+	// are detected and cleaned up promptly.
+	const pongWait = 60 * time.Second
+	const pingPeriod = 54 * time.Second
+	conn.SetReadDeadline(time.Now().Add(pongWait))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
+
 	h.WS.Register(user.ID, conn)
 	defer h.WS.Unregister(user.ID, conn)
+
+	// Ping goroutine — stopped when Connect returns (deferred close(stopPing)).
+	stopPing := make(chan struct{})
+	defer close(stopPing)
+	go func() {
+		ticker := time.NewTicker(pingPeriod)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopPing:
+				return
+			case <-ticker.C:
+				// Send the ping through the manager so it serialises with all
+				// other writes to this connection (Gorilla forbids concurrent
+				// writers); a raw write here races SendToConn/SendToUser during a
+				// call and corrupts the frame stream, dropping the socket at ~60s.
+				if err := h.WS.PingConn(user.ID, conn); err != nil {
+					return
+				}
+			}
+		}
+	}()
 
 	// mark online + update last_seen
 	now := time.Now()
@@ -99,6 +155,16 @@ func (h *WSHandler) Connect(c *gin.Context) {
 	// broadcast user came online to everyone else
 	h.broadcastPresence(&user, "user:online")
 
+	// Per-connection WebRTC session: signaling for this socket targets this
+	// exact connection, and we track the SFU peers it owns so they can be torn
+	// down when the socket closes.
+	session := &callSession{
+		send: func(eventType string, data interface{}) {
+			h.WS.SendToConn(user.ID, conn, eventType, data)
+		},
+		peers: make(map[string]*sfu.Peer),
+	}
+
 	// read loop
 	for {
 		_, raw, err := conn.ReadMessage()
@@ -109,8 +175,28 @@ func (h *WSHandler) Connect(c *gin.Context) {
 		if err := json.Unmarshal(raw, &event); err != nil {
 			continue
 		}
-		h.handleEvent(&user, event)
+		h.handleEvent(&user, session, event)
 	}
+
+	// Socket closed — tear down any SFU peers so forwarded tracks stop and the
+	// remaining participants renegotiate.
+	for _, p := range session.peers {
+		p.Close()
+	}
+
+	// This connection is finished. Remove it now (rather than relying solely on
+	// the deferred Unregister) so we can tell whether the user still has other
+	// live tabs before we flip presence or tear down their calls.
+	h.WS.Unregister(user.ID, conn)
+	if h.WS.IsOnline(user.ID) {
+		// Another tab/connection is still active — keep the user online and
+		// leave any in-progress call untouched.
+		return
+	}
+
+	// Fully disconnected — leave any active calls so we don't leave ghost
+	// participants and "ongoing" calls that block future calls.
+	h.cleanupUserCalls(&user)
 
 	// disconnected — mark offline + update last_seen
 	database.DB.Model(&user).Updates(map[string]interface{}{
@@ -119,6 +205,62 @@ func (h *WSHandler) Connect(c *gin.Context) {
 	user.IsOnline = false
 	user.Status = "offline"
 	h.broadcastPresence(&user, "user:offline")
+}
+
+// cleanupUserCalls leaves every active call the user is currently joined to.
+// Called when the user's last connection drops so calls don't linger as
+// "ongoing" and 1:1 peers are notified that the call ended.
+func (h *WSHandler) cleanupUserCalls(user *models.User) {
+	var participations []models.CallParticipant
+	database.DB.
+		Joins("JOIN calls ON calls.id = call_participants.call_id").
+		Where("call_participants.user_id = ? AND call_participants.status = ? AND calls.status IN ?",
+			user.ID, "joined", []string{"initiated", "ongoing"}).
+		Find(&participations)
+
+	for _, part := range participations {
+		call, err := h.CallService.LeaveCall(part.CallID, user.ID)
+		if err != nil {
+			continue
+		}
+		ts := time.Now().UTC().Format(time.RFC3339)
+		if call.Status == "ended" {
+			h.WS.CancelCallTimer(call.ID)
+			for _, p := range call.Participants {
+				if p.UserID == user.ID {
+					continue // about to be marked offline below
+				}
+				database.DB.Model(&models.User{}).Where("id = ?", p.UserID).Update("status", "online")
+				h.WS.BroadcastPresenceChange(p.UserID, true, "online")
+				h.WS.SendToUser(p.UserID, "call:ended", gin.H{
+					"call_id":          call.ID,
+					"ended_by":         user.ID,
+					"duration_seconds": call.DurationSeconds,
+					"timestamp":        ts,
+				})
+			}
+		} else {
+			leaverInfo := gin.H{"id": user.ID, "full_name": user.FullName, "avatar_url": user.AvatarURL}
+			for _, p := range call.Participants {
+				if p.UserID == user.ID {
+					continue
+				}
+				h.WS.SendToUser(p.UserID, "call:participant_left", gin.H{
+					"call_id":   call.ID,
+					"user_id":   user.ID,
+					"user":      leaverInfo,
+					"timestamp": ts,
+				})
+				// call.InitiatedBy reflects any host reassignment done in LeaveCall.
+				h.WS.SendToUser(p.UserID, "call:updated", gin.H{
+					"call_id":         call.ID,
+					"conversation_id": call.ConversationID,
+					"initiated_by":    call.InitiatedBy,
+					"timestamp":       ts,
+				})
+			}
+		}
+	}
 }
 
 func (h *WSHandler) broadcastPresence(user *models.User, eventType string) {
@@ -136,7 +278,7 @@ func (h *WSHandler) broadcastPresence(user *models.User, eventType string) {
 	}
 }
 
-func (h *WSHandler) handleEvent(user *models.User, event inboundEvent) {
+func (h *WSHandler) handleEvent(user *models.User, sess *callSession, event inboundEvent) {
 	switch event.Type {
 	case "user:status":
 		h.handleUserStatus(user, event.Data)
@@ -146,25 +288,146 @@ func (h *WSHandler) handleEvent(user *models.User, event inboundEvent) {
 		h.handleMessageRead(user, event.Data)
 	case "call:initiate":
 		h.handleCallInitiate(user, event.Data)
-	case "call:answer":
-		h.handleCallAnswer(user, event.Data)
 	case "call:reject":
 		h.handleCallReject(user, event.Data)
-	case "call:ice-candidate":
-		h.handleICECandidate(user, event.Data)
 	case "call:end":
 		h.handleCallEnd(user, event.Data)
-	case "call:join":
-		h.handleCallJoin(user, event.Data)
-	case "call:screen-share":
-		h.handleScreenShare(user, event.Data)
-	case "call:camera-toggle":
-		h.handleCameraToggle(user, event.Data)
-	case "call:peer_offer":
-		h.handlePeerOffer(user, event.Data)
-	case "call:peer_answer":
-		h.handlePeerAnswer(user, event.Data)
+	// ── WebRTC SFU signaling ──
+	case "webrtc:join":
+		h.handleWebRTCJoin(user, sess, event.Data)
+	case "webrtc:answer":
+		h.handleWebRTCAnswer(sess, event.Data)
+	case "webrtc:ice":
+		h.handleWebRTCICE(sess, event.Data)
+	case "webrtc:leave":
+		h.handleWebRTCLeave(sess, event.Data)
+	case "call:signal":
+		h.handleCallSignal(user, event.Data)
+	case "whiteboard:stroke":
+		h.handleWhiteboardStroke(user, event.Data)
+	case "whiteboard:clear":
+		h.handleWhiteboardClear(user, event.Data)
+	case "whiteboard:shape":
+		h.relayWhiteboardEvent(user, event.Data, "whiteboard:shape")
+	case "whiteboard:note_add":
+		h.relayWhiteboardEvent(user, event.Data, "whiteboard:note_add")
+	case "whiteboard:note_move":
+		h.relayWhiteboardEvent(user, event.Data, "whiteboard:note_move")
+	case "whiteboard:note_edit":
+		h.relayWhiteboardEvent(user, event.Data, "whiteboard:note_edit")
+	case "whiteboard:note_delete":
+		h.relayWhiteboardEvent(user, event.Data, "whiteboard:note_delete")
+	case "whiteboard:cursor":
+		h.relayWhiteboardEvent(user, event.Data, "whiteboard:cursor")
+	case "whiteboard:cursor_leave":
+		h.relayWhiteboardEvent(user, event.Data, "whiteboard:cursor_leave")
+	case "whiteboard:text":
+		h.relayWhiteboardEvent(user, event.Data, "whiteboard:text")
+	case "whiteboard:image":
+		h.relayWhiteboardEvent(user, event.Data, "whiteboard:image")
 	}
+}
+
+// handleWebRTCJoin sets up this connection's server-side PeerConnection for a
+// room. The SFU is the offerer, so the offer arrives back over "webrtc:offer".
+func (h *WSHandler) handleWebRTCJoin(user *models.User, sess *callSession, data json.RawMessage) {
+	var d struct {
+		Room string `json:"room"`
+	}
+	if err := json.Unmarshal(data, &d); err != nil || d.Room == "" {
+		return
+	}
+	// A re-join (e.g. after a media glitch) replaces the stale peer.
+	if existing := sess.peers[d.Room]; existing != nil {
+		existing.Close()
+		delete(sess.peers, d.Room)
+	}
+	peer, err := h.SFU.Join(d.Room, user.ID, sess.send)
+	if err != nil {
+		log.Printf("sfu: join room %s failed: %v", d.Room, err)
+		return
+	}
+	sess.peers[d.Room] = peer
+}
+
+func (h *WSHandler) handleWebRTCAnswer(sess *callSession, data json.RawMessage) {
+	var d struct {
+		Room string `json:"room"`
+		SDP  string `json:"sdp"`
+	}
+	if err := json.Unmarshal(data, &d); err != nil {
+		return
+	}
+	if peer := sess.peers[d.Room]; peer != nil {
+		if err := peer.HandleAnswer(d.SDP); err != nil {
+			log.Printf("sfu: answer for room %s failed: %v", d.Room, err)
+		}
+	}
+}
+
+func (h *WSHandler) handleWebRTCICE(sess *callSession, data json.RawMessage) {
+	var d struct {
+		Room      string                `json:"room"`
+		Candidate pion.ICECandidateInit `json:"candidate"`
+	}
+	if err := json.Unmarshal(data, &d); err != nil {
+		return
+	}
+	if peer := sess.peers[d.Room]; peer != nil {
+		_ = peer.HandleICE(d.Candidate)
+	}
+}
+
+func (h *WSHandler) handleWebRTCLeave(sess *callSession, data json.RawMessage) {
+	var d struct {
+		Room string `json:"room"`
+	}
+	if err := json.Unmarshal(data, &d); err != nil {
+		return
+	}
+	if peer := sess.peers[d.Room]; peer != nil {
+		peer.Close()
+		delete(sess.peers, d.Room)
+	}
+}
+
+// handleCallSignal relays in-call signals (raise hand, reactions, mute state) to
+// the other participants of the room.
+func (h *WSHandler) handleCallSignal(user *models.User, data json.RawMessage) {
+	var d struct {
+		Room    string          `json:"room"`
+		Payload json.RawMessage `json:"payload"`
+	}
+	if err := json.Unmarshal(data, &d); err != nil || d.Room == "" {
+		return
+	}
+	h.SFU.Broadcast(d.Room, "call:signal", gin.H{
+		"room":    d.Room,
+		"from":    user.ID,
+		"payload": d.Payload,
+	}, user.ID)
+}
+
+// BuildRoster is the SFU roster callback: it enriches the room's userIDs with
+// display names/avatars and broadcasts them so each tile can be labelled.
+func (h *WSHandler) BuildRoster(room string, userIDs []string) {
+	participants := make([]gin.H, 0, len(userIDs))
+	if len(userIDs) > 0 {
+		var users []models.User
+		database.DB.Where("id IN ?", userIDs).Find(&users)
+		for _, u := range users {
+			avatar := ""
+			if u.AvatarURL != nil {
+				avatar = *u.AvatarURL
+			}
+			name := u.FullName
+			if u.DisplayName != nil && *u.DisplayName != "" {
+				name = *u.DisplayName
+			}
+			participants = append(participants, gin.H{"id": u.ID, "name": name, "avatar": avatar})
+		}
+	}
+	h.SFU.Broadcast(room, "call:roster", gin.H{"room": room, "participants": participants}, "")
 }
 
 func (h *WSHandler) handleUserStatus(user *models.User, data json.RawMessage) {
@@ -188,14 +451,24 @@ func (h *WSHandler) handleTyping(user *models.User, data json.RawMessage) {
 		ConversationID string `json:"conversation_id"`
 		IsTyping       bool   `json:"is_typing"`
 	}
-	if err := json.Unmarshal(data, &d); err != nil {
+	if err := json.Unmarshal(data, &d); err != nil || d.ConversationID == "" {
 		return
+	}
+	// verify the sender is a member before fanning out (prevents enumeration)
+	var senderMembership models.ConversationMember
+	if err := database.DB.Where("conversation_id = ? AND user_id = ?", d.ConversationID, user.ID).First(&senderMembership).Error; err != nil {
+		return
+	}
+	displayName := user.FullName
+	if user.DisplayName != nil && *user.DisplayName != "" {
+		displayName = *user.DisplayName
 	}
 	var members []models.ConversationMember
 	database.DB.Where("conversation_id = ? AND user_id != ?", d.ConversationID, user.ID).Find(&members)
 	for _, m := range members {
 		h.WS.SendToUser(m.UserID, "message:typing", gin.H{
 			"user_id":         user.ID,
+			"display_name":    displayName,
 			"conversation_id": d.ConversationID,
 			"is_typing":       d.IsTyping,
 			"timestamp":       time.Now().UTC().Format(time.RFC3339),
@@ -225,152 +498,11 @@ func (h *WSHandler) handleMessageRead(user *models.User, data json.RawMessage) {
 }
 
 func (h *WSHandler) handleCallInitiate(user *models.User, data json.RawMessage) {
-	var d struct {
-		CallID         string      `json:"call_id"`
-		ConversationID string      `json:"conversation_id"`
-		Type           string      `json:"type"`
-		OfferSDP       interface{} `json:"offer_sdp"`
-	}
-	if err := json.Unmarshal(data, &d); err != nil || d.CallID == "" {
-		return
-	}
-
-	var call models.Call
-	if database.DB.First(&call, "id = ?", d.CallID).Error != nil {
-		return
-	}
-
-	// set caller status to busy
-	database.DB.Model(user).Update("status", "busy")
-	user.Status = "busy"
-	h.broadcastPresence(user, "user:presence")
-
-	callerInfo := gin.H{
-		"id":        user.ID,
-		"full_name": user.FullName,
-		"avatar_url": user.AvatarURL,
-	}
-
-	var members []models.ConversationMember
-	database.DB.Where("conversation_id = ? AND user_id != ?", d.ConversationID, user.ID).Find(&members)
-	for _, m := range members {
-		h.WS.SendToUser(m.UserID, "call:incoming", gin.H{
-			"call_id":         call.ID,
-			"caller":          callerInfo,
-			"type":            call.Type,
-			"offer_sdp":       d.OfferSDP,
-			"conversation_id": d.ConversationID,
-			"timestamp":       time.Now().UTC().Format(time.RFC3339),
-		})
-	}
-
-	// 30-second unanswered timeout
-	timer := time.AfterFunc(30*time.Second, func() {
-		var c models.Call
-		if database.DB.First(&c, "id = ?", d.CallID).Error != nil {
-			return
-		}
-		if c.Status == "initiated" {
-			now := time.Now()
-			database.DB.Model(&c).Updates(map[string]interface{}{
-				"status": "missed", "ended_at": now,
-			})
-			database.DB.Model(&models.User{}).Where("id = ?", user.ID).Update("status", "online")
-			database.DB.Model(&models.CallParticipant{}).Where("call_id = ?", d.CallID).
-				Where("status IN ?", []string{"invited", "missed"}).Update("status", "missed")
-
-			timeoutPayload := gin.H{
-				"call_id":   d.CallID,
-				"message":   "User did not respond to the call",
-				"timestamp": now.UTC().Format(time.RFC3339),
-			}
-			h.WS.SendToUser(user.ID, "call:timeout", timeoutPayload)
-			for _, m := range members {
-				h.WS.SendToUser(m.UserID, "call:timeout", gin.H{
-					"call_id":   d.CallID,
-					"timestamp": now.UTC().Format(time.RFC3339),
-				})
-			}
-		}
-	})
-	h.WS.SetCallTimer(d.CallID, timer)
-}
-
-func (h *WSHandler) handleCallAnswer(user *models.User, data json.RawMessage) {
-	var d struct {
-		CallID    string      `json:"call_id"`
-		AnswerSDP interface{} `json:"answer_sdp"`
-	}
-	if err := json.Unmarshal(data, &d); err != nil || d.CallID == "" {
-		return
-	}
-	h.WS.CancelCallTimer(d.CallID)
-
-	now := time.Now()
-	database.DB.Model(&models.CallParticipant{}).
-		Where("call_id = ? AND user_id = ?", d.CallID, user.ID).
-		Updates(map[string]interface{}{"status": "joined", "joined_at": now})
-	database.DB.Model(&models.Call{}).Where("id = ?", d.CallID).Update("status", "ongoing")
-	database.DB.Model(user).Update("status", "busy")
-	user.Status = "busy"
-	h.broadcastPresence(user, "user:presence")
-
-	answererInfo := gin.H{
-		"id": user.ID, "full_name": user.FullName, "avatar_url": user.AvatarURL,
-	}
-
-	// notify initiator
-	var call models.Call
-	if database.DB.First(&call, "id = ?", d.CallID).Error == nil {
-		h.WS.SendToUser(call.InitiatedBy, "call:answered", gin.H{
-			"call_id":    d.CallID,
-			"user_id":    user.ID,
-			"user":       answererInfo,
-			"answer_sdp": d.AnswerSDP,
-			"timestamp":  now.UTC().Format(time.RFC3339),
-		})
-
-		// Flush any ICE candidates that were buffered for the answerer while
-		// their peer connection did not exist yet. These are sent NOW because
-		// answerCall() has already called setRemoteDescription(offer) and
-		// setLocalDescription(answer) before emitting call:answer, so the
-		// callee's PC is fully configured and can apply the candidates.
-		for _, p := range h.WS.FlushICECandidates(d.CallID, user.ID) {
-			h.WS.SendToUser(user.ID, "call:ice-candidate", p)
-		}
-	}
-
-	// Determine whether this is the first answerer. When B is the first answerer,
-	// A (initiator) handles the direct connection via call:answered using its
-	// pendingPC. Sending call:participant_joined to A at the same time causes a
-	// race: call:answered does an async setRemoteDescription that yields the JS
-	// event loop, so call:participant_joined fires first, finds pcsRef[B] empty,
-	// and creates a second PC — which then destroys B's original valid PC for A
-	// (via buildPCForPeer's close() call), breaking A's media path to B entirely.
-	// For 2nd+ answerers A's pendingPC is already consumed, so A legitimately
-	// needs call:participant_joined to open a fresh peer connection to the new joiner.
-	var otherJoinedCount int64
-	database.DB.Model(&models.CallParticipant{}).
-		Where("call_id = ? AND status = ? AND user_id NOT IN ?",
-			d.CallID, "joined", []string{user.ID, call.InitiatedBy}).
-		Count(&otherJoinedCount)
-	isFirstAnswerer := otherJoinedCount == 0
-
-	// notify all other joined participants so they can open a P2P connection
-	var joinedParticipants []models.CallParticipant
-	database.DB.Where("call_id = ? AND status = ? AND user_id != ?", d.CallID, "joined", user.ID).
-		Find(&joinedParticipants)
-	for _, p := range joinedParticipants {
-		if isFirstAnswerer && p.UserID == call.InitiatedBy {
-			continue
-		}
-		h.WS.SendToUser(p.UserID, "call:participant_joined", gin.H{
-			"call_id":   d.CallID,
-			"user_id":   user.ID,
-			"user":      answererInfo,
-			"timestamp": now.UTC().Format(time.RFC3339),
-		})
-	}
+	// Call initiation (call:incoming notifications, busy status, 30-second
+	// timeout) is now handled entirely by the REST InitiateCall handler so
+	// it works even when the WebSocket is mid-reconnect. This handler is
+	// intentionally a no-op and kept only for backward-compat with any
+	// client still emitting the call:initiate event.
 }
 
 func (h *WSHandler) handleCallReject(user *models.User, data json.RawMessage) {
@@ -380,13 +512,12 @@ func (h *WSHandler) handleCallReject(user *models.User, data json.RawMessage) {
 	if err := json.Unmarshal(data, &d); err != nil || d.CallID == "" {
 		return
 	}
-	h.WS.ClearCallICEBuffers(d.CallID)
 
 	now := time.Now()
 	// Mark only this participant as having rejected the call.
 	database.DB.Model(&models.CallParticipant{}).
 		Where("call_id = ? AND user_id = ?", d.CallID, user.ID).
-		Update("status", "missed")
+		Update("status", "rejected")
 
 	var call models.Call
 	if database.DB.First(&call, "id = ?", d.CallID).Error != nil {
@@ -422,56 +553,92 @@ func (h *WSHandler) handleCallReject(user *models.User, data json.RawMessage) {
 			"status": "missed", "ended_at": now,
 		})
 		database.DB.Model(&models.User{}).Where("id = ?", call.InitiatedBy).Update("status", "online")
+		h.WS.BroadcastPresenceChange(call.InitiatedBy, true, "online")
 	}
 }
 
-func (h *WSHandler) handleICECandidate(user *models.User, data json.RawMessage) {
+// relayWhiteboardEvent is a generic helper that verifies membership and
+// broadcasts any whiteboard event (with user_id injected) to other members.
+func (h *WSHandler) relayWhiteboardEvent(user *models.User, data json.RawMessage, eventType string) {
 	var d struct {
-		CallID       string      `json:"call_id"`
-		TargetUserID *string     `json:"target_user_id"`
-		Candidate    interface{} `json:"candidate"`
+		ConversationID string `json:"conversation_id"`
 	}
-	if err := json.Unmarshal(data, &d); err != nil {
+	if err := json.Unmarshal(data, &d); err != nil || d.ConversationID == "" {
 		return
 	}
+	var membership models.ConversationMember
+	if database.DB.Where("conversation_id = ? AND user_id = ?", d.ConversationID, user.ID).First(&membership).Error != nil {
+		return
+	}
+	var members []models.ConversationMember
+	database.DB.Where("conversation_id = ? AND user_id != ?", d.ConversationID, user.ID).Find(&members)
+	var payload map[string]interface{}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return
+	}
+	payload["user_id"] = user.ID
+	for _, m := range members {
+		h.WS.SendToUser(m.UserID, eventType, payload)
+	}
+}
 
+func (h *WSHandler) handleWhiteboardStroke(user *models.User, data json.RawMessage) {
+	var d struct {
+		ConversationID string  `json:"conversation_id"`
+		Tool           string  `json:"tool"`
+		Color          string  `json:"color"`
+		Size           float64 `json:"size"`
+		From           struct {
+			X float64 `json:"x"`
+			Y float64 `json:"y"`
+		} `json:"from"`
+		To struct {
+			X float64 `json:"x"`
+			Y float64 `json:"y"`
+		} `json:"to"`
+	}
+	if err := json.Unmarshal(data, &d); err != nil || d.ConversationID == "" {
+		return
+	}
+	var membership models.ConversationMember
+	if database.DB.Where("conversation_id = ? AND user_id = ?", d.ConversationID, user.ID).First(&membership).Error != nil {
+		return
+	}
+	var members []models.ConversationMember
+	database.DB.Where("conversation_id = ? AND user_id != ?", d.ConversationID, user.ID).Find(&members)
 	payload := map[string]interface{}{
-		"call_id":   d.CallID,
-		"user_id":   user.ID,
-		"candidate": d.Candidate,
-		"timestamp": time.Now().UTC().Format(time.RFC3339),
+		"conversation_id": d.ConversationID,
+		"user_id":         user.ID,
+		"tool":            d.Tool,
+		"color":           d.Color,
+		"size":            d.Size,
+		"from":            map[string]float64{"x": d.From.X, "y": d.From.Y},
+		"to":              map[string]float64{"x": d.To.X, "y": d.To.Y},
 	}
+	for _, m := range members {
+		h.WS.SendToUser(m.UserID, "whiteboard:stroke", payload)
+	}
+}
 
-	if d.TargetUserID != nil && *d.TargetUserID != "" {
-		h.WS.SendToUser(*d.TargetUserID, "call:ice-candidate", payload)
+func (h *WSHandler) handleWhiteboardClear(user *models.User, data json.RawMessage) {
+	var d struct {
+		ConversationID string `json:"conversation_id"`
+	}
+	if err := json.Unmarshal(data, &d); err != nil || d.ConversationID == "" {
 		return
 	}
-
-	// Relay to all other participants.
-	// Participants who have not yet answered (status != "joined") cannot apply
-	// candidates — their peer connection does not exist yet. Buffer for them
-	// and flush when they answer (see handleCallAnswer).
-	var call models.Call
-	if database.DB.First(&call, "id = ?", d.CallID).Error != nil {
+	var membership models.ConversationMember
+	if database.DB.Where("conversation_id = ? AND user_id = ?", d.ConversationID, user.ID).First(&membership).Error != nil {
 		return
 	}
-	var participants []models.CallParticipant
-	database.DB.Where("call_id = ? AND user_id != ?", d.CallID, user.ID).Find(&participants)
-	notified := map[string]bool{}
-	for _, p := range participants {
-		if notified[p.UserID] {
-			continue
-		}
-		notified[p.UserID] = true
-		if p.Status == "joined" {
-			h.WS.SendToUser(p.UserID, "call:ice-candidate", payload)
-		} else {
-			h.WS.BufferICECandidate(d.CallID, p.UserID, payload)
-		}
+	var members []models.ConversationMember
+	database.DB.Where("conversation_id = ? AND user_id != ?", d.ConversationID, user.ID).Find(&members)
+	payload := map[string]interface{}{
+		"conversation_id": d.ConversationID,
+		"user_id":         user.ID,
 	}
-	if !notified[call.InitiatedBy] && call.InitiatedBy != user.ID {
-		// Initiator is always "joined" (set in InitiateCall service).
-		h.WS.SendToUser(call.InitiatedBy, "call:ice-candidate", payload)
+	for _, m := range members {
+		h.WS.SendToUser(m.UserID, "whiteboard:clear", payload)
 	}
 }
 
@@ -483,7 +650,6 @@ func (h *WSHandler) handleCallEnd(user *models.User, data json.RawMessage) {
 		return
 	}
 	h.WS.CancelCallTimer(d.CallID)
-	h.WS.ClearCallICEBuffers(d.CallID)
 
 	var call models.Call
 	if database.DB.Preload("Participants").First(&call, "id = ?", d.CallID).Error != nil {
@@ -505,12 +671,14 @@ func (h *WSHandler) handleCallEnd(user *models.User, data json.RawMessage) {
 		if p.Status == "joined" {
 			database.DB.Model(&p).Updates(map[string]interface{}{"left_at": now, "status": "left"})
 			database.DB.Model(&models.User{}).Where("id = ?", p.UserID).Update("status", "online")
+			h.WS.BroadcastPresenceChange(p.UserID, true, "online")
 		}
 		notifyIDs[p.UserID] = true
 	}
 
 	// reset initiator status
 	database.DB.Model(&models.User{}).Where("id = ?", call.InitiatedBy).Update("status", "online")
+	h.WS.BroadcastPresenceChange(call.InitiatedBy, true, "online")
 
 	endedPayload := gin.H{
 		"call_id":          d.CallID,
@@ -523,112 +691,4 @@ func (h *WSHandler) handleCallEnd(user *models.User, data json.RawMessage) {
 			h.WS.SendToUser(uid, "call:ended", endedPayload)
 		}
 	}
-}
-
-func (h *WSHandler) handleCallJoin(user *models.User, data json.RawMessage) {
-	var d struct {
-		CallID string `json:"call_id"`
-	}
-	if err := json.Unmarshal(data, &d); err != nil || d.CallID == "" {
-		return
-	}
-	now := time.Now()
-	database.DB.Model(&models.CallParticipant{}).
-		Where("call_id = ? AND user_id = ?", d.CallID, user.ID).
-		Updates(map[string]interface{}{"status": "joined", "joined_at": now})
-	database.DB.Model(user).Update("status", "busy")
-	user.Status = "busy"
-	h.broadcastPresence(user, "user:presence")
-
-	joiningInfo := gin.H{"id": user.ID, "full_name": user.FullName, "avatar_url": user.AvatarURL}
-
-	var joinedParticipants []models.CallParticipant
-	database.DB.Where("call_id = ? AND status = ? AND user_id != ?", d.CallID, "joined", user.ID).
-		Find(&joinedParticipants)
-	for _, p := range joinedParticipants {
-		h.WS.SendToUser(p.UserID, "call:participant_joined", gin.H{
-			"call_id":   d.CallID,
-			"user_id":   user.ID,
-			"user":      joiningInfo,
-			"timestamp": now.UTC().Format(time.RFC3339),
-		})
-	}
-}
-
-func (h *WSHandler) handleScreenShare(user *models.User, data json.RawMessage) {
-	var d struct {
-		CallID    string `json:"call_id"`
-		IsSharing bool   `json:"is_sharing"`
-	}
-	if err := json.Unmarshal(data, &d); err != nil {
-		return
-	}
-	var joinedParticipants []models.CallParticipant
-	database.DB.Where("call_id = ? AND status = ? AND user_id != ?", d.CallID, "joined", user.ID).
-		Find(&joinedParticipants)
-	for _, p := range joinedParticipants {
-		h.WS.SendToUser(p.UserID, "call:screen-share", gin.H{
-			"call_id":    d.CallID,
-			"user_id":    user.ID,
-			"is_sharing": d.IsSharing,
-			"timestamp":  time.Now().UTC().Format(time.RFC3339),
-		})
-	}
-}
-
-func (h *WSHandler) handleCameraToggle(user *models.User, data json.RawMessage) {
-	var d struct {
-		CallID   string `json:"call_id"`
-		CameraOn bool   `json:"camera_on"`
-	}
-	if err := json.Unmarshal(data, &d); err != nil {
-		return
-	}
-	var joinedParticipants []models.CallParticipant
-	database.DB.Where("call_id = ? AND status = ? AND user_id != ?", d.CallID, "joined", user.ID).
-		Find(&joinedParticipants)
-	for _, p := range joinedParticipants {
-		h.WS.SendToUser(p.UserID, "call:camera-toggle", gin.H{
-			"call_id":   d.CallID,
-			"user_id":   user.ID,
-			"camera_on": d.CameraOn,
-			"timestamp": time.Now().UTC().Format(time.RFC3339),
-		})
-	}
-}
-
-func (h *WSHandler) handlePeerOffer(user *models.User, data json.RawMessage) {
-	var d struct {
-		TargetUserID string      `json:"target_user_id"`
-		CallID       string      `json:"call_id"`
-		OfferSDP     interface{} `json:"offer_sdp"`
-	}
-	if err := json.Unmarshal(data, &d); err != nil || d.TargetUserID == "" {
-		return
-	}
-	senderInfo := gin.H{"id": user.ID, "full_name": user.FullName, "avatar_url": user.AvatarURL}
-	h.WS.SendToUser(d.TargetUserID, "call:peer_offer", gin.H{
-		"call_id":      d.CallID,
-		"from_user_id": user.ID,
-		"from_user":    senderInfo,
-		"offer_sdp":    d.OfferSDP,
-		"timestamp":    time.Now().UTC().Format(time.RFC3339),
-	})
-}
-
-func (h *WSHandler) handlePeerAnswer(user *models.User, data json.RawMessage) {
-	var d struct {
-		TargetUserID string      `json:"target_user_id"`
-		CallID       string      `json:"call_id"`
-		AnswerSDP    interface{} `json:"answer_sdp"`
-	}
-	if err := json.Unmarshal(data, &d); err != nil || d.TargetUserID == "" {
-		return
-	}
-	h.WS.SendToUser(d.TargetUserID, "call:peer_answer", gin.H{
-		"call_id":      d.CallID,
-		"from_user_id": user.ID,
-		"answer_sdp":   d.AnswerSDP,
-		"timestamp":    time.Now().UTC().Format(time.RFC3339),
-	})
 }

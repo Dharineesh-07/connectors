@@ -145,7 +145,7 @@ export default function Login() {
           </div>
           <h1 className="text-2xl font-black text-cn-charcoal tracking-tight mb-2">Forgot password?</h1>
           <p className="text-sm text-cn-gray-600 mb-8 leading-relaxed">
-            No worries! Enter your email and we'll send you a 6-digit OTP to reset your password.
+            No worries! Enter your email and we&apos;ll send you a 6-digit OTP to reset your password.
           </p>
 
           <form onSubmit={handleRequestOTP} className="space-y-4">

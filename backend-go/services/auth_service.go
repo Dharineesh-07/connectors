@@ -2,9 +2,10 @@ package services
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
-	"math/rand"
+	"math/big"
 	"strings"
 	"time"
 
@@ -36,9 +37,6 @@ func (s *AuthService) validateDomain(email string) error {
 }
 
 func (s *AuthService) config() string {
-	from := store.RDB
-	_ = from
-	// pull domain from config package
 	return authDomain
 }
 
@@ -130,16 +128,22 @@ func (s *AuthService) RequestPasswordReset(email string) error {
 		return nil // silently succeed
 	}
 
-	otp := fmt.Sprintf("%06d", rand.Intn(1000000))
+	n, err := rand.Int(rand.Reader, big.NewInt(1000000))
+	if err != nil {
+		return err
+	}
+	otp := fmt.Sprintf("%06d", n.Int64())
 	expires := time.Now().Add(3 * time.Minute)
 
 	// upsert: delete old + insert new
 	database.DB.Where("email = ?", email).Delete(&models.PasswordResetOTP{})
 	database.DB.Create(&models.PasswordResetOTP{Email: email, OTP: otp, ExpiresAt: expires})
 
-	// store in Redis as well for fast lookup
-	store.RDB.Set(context.Background(), "otp:"+email, otp, 3*time.Minute)
-	fmt.Printf("[OTP] %s: %s\n", email, otp)
+	// store in Redis as well for fast lookup (best-effort; the DB row above is
+	// the source of truth, so skip silently when Redis is unavailable)
+	if store.RDB != nil {
+		store.RDB.Set(context.Background(), "otp:"+email, otp, 3*time.Minute)
+	}
 	return nil
 }
 
@@ -164,12 +168,18 @@ func (s *AuthService) ResetPassword(email, otp, newPassword string) error {
 	}
 
 	tx := database.DB.Begin()
-	tx.Model(&models.User{}).Where("email = ?", email).Updates(map[string]interface{}{
+	if err := tx.Model(&models.User{}).Where("email = ?", email).Updates(map[string]interface{}{
 		"password_hash": hash,
 		"is_online":     false,
 		"status":        "offline",
-	})
-	tx.Delete(&record)
+	}).Error; err != nil {
+		tx.Rollback()
+		return err
+	}
+	if err := tx.Delete(&record).Error; err != nil {
+		tx.Rollback()
+		return err
+	}
 	if err := tx.Commit().Error; err != nil {
 		tx.Rollback()
 		return err
@@ -180,6 +190,8 @@ func (s *AuthService) ResetPassword(email, otp, newPassword string) error {
 	if database.DB.Where("email = ?", email).First(&user).Error == nil {
 		utils.RevokeRefreshToken(user.ID)
 	}
-	store.RDB.Del(context.Background(), "otp:"+email)
+	if store.RDB != nil {
+		store.RDB.Del(context.Background(), "otp:"+email)
+	}
 	return nil
 }

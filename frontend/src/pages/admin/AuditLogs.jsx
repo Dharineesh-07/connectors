@@ -1,5 +1,7 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useQuery } from 'react-query'
+import { XMarkIcon } from '@heroicons/react/24/outline'
 import { getAuditLogs } from '../../api/admin'
 import AuditLogItem from '../../components/admin/AuditLogItem'
 
@@ -14,6 +16,7 @@ const ACTION_FILTERS = [
 ]
 
 export default function AuditLogs() {
+  const navigate = useNavigate()
   const [page, setPage] = useState(1)
   const [action, setAction] = useState('')
 
@@ -37,20 +40,29 @@ export default function AuditLogs() {
             {total} recorded admin events
           </p>
         </div>
-        <select
-          value={action}
-          onChange={(e) => {
-            setPage(1)
-            setAction(e.target.value)
-          }}
-          className="min-w-44 rounded-sm border border-cn-gray-200 bg-cn-white px-3 py-2 text-sm font-medium text-cn-gray-600 focus:outline-none focus:border-cn-blue transition-fast"
-        >
-          {ACTION_FILTERS.map((option) => (
-            <option key={option.value || 'all'} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
+        <div className="flex items-center gap-2">
+          <select
+            value={action}
+            onChange={(e) => {
+              setPage(1)
+              setAction(e.target.value)
+            }}
+            className="min-w-44 rounded-sm border border-cn-gray-200 bg-cn-white px-3 py-2 text-sm font-medium text-cn-gray-600 focus:outline-none focus:border-cn-blue transition-fast"
+          >
+            {ACTION_FILTERS.map((option) => (
+              <option key={option.value || 'all'} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={() => navigate('/admin')}
+            className="p-2 rounded-lg text-cn-gray-400 hover:text-cn-red hover:bg-cn-red-light transition-fast"
+            title="Close"
+          >
+            <XMarkIcon className="w-5 h-5" />
+          </button>
+        </div>
       </div>
 
       <div className="bg-cn-white rounded-md overflow-hidden shadow-card border border-cn-gray-200">
