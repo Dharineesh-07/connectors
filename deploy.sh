@@ -7,8 +7,8 @@ echo "==> Pulling latest code..."
 git pull origin main
 
 echo "==> Building and restarting services..."
-docker compose -f docker-compose.prod.yml build --no-cache
-docker compose -f docker-compose.prod.yml up -d
+docker compose -f docker-compose.yml build --no-cache
+docker compose -f docker-compose.yml up -d
 
 echo "==> Waiting for backend to be healthy..."
 for i in $(seq 1 20); do
@@ -19,5 +19,5 @@ for i in $(seq 1 20); do
   sleep 3
 done
 
-docker compose -f docker-compose.prod.yml ps
+docker compose -f docker-compose.yml ps
 echo "==> Deploy complete."
