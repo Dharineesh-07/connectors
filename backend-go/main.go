@@ -4,8 +4,10 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -74,7 +76,31 @@ func main() {
 	// When SFU room membership changes, broadcast a labelled participant roster.
 	sfuInstance.SetRosterCallback(wsH.BuildRoster)
 
-	r := gin.Default()
+	r := gin.New()
+	r.Use(gin.Recovery())
+	// Skip the OAuth callback path so the one-time authorization code is never
+	// written into application logs.
+	r.Use(gin.LoggerWithConfig(gin.LoggerConfig{
+		SkipPaths: []string{"/api/google/calendar/callback"},
+	}))
+
+	// Security headers
+	r.Use(func(c *gin.Context) {
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("X-Frame-Options", "DENY")
+		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
+		c.Header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		c.Header("Content-Security-Policy",
+			"default-src 'self'; "+
+				"script-src 'self'; "+
+				"style-src 'self' 'unsafe-inline'; "+
+				"img-src 'self' data: https:; "+
+				"connect-src 'self' ws: wss:; "+
+				"media-src 'self' blob:; "+
+				"worker-src 'self' blob:; "+
+				"frame-ancestors 'none'")
+		c.Next()
+	})
 
 	// CORS
 	r.Use(cors.New(cors.Config{
@@ -86,11 +112,17 @@ func main() {
 		MaxAge:           12 * time.Hour,
 	}))
 
-	// static uploads — force download to prevent browsers rendering active content (e.g. HTML)
-	r.GET("/uploads/*filepath", func(c *gin.Context) {
+	// static uploads — authentication required; force download to prevent inline rendering
+	r.GET("/uploads/*filepath", middleware.AuthRequired(), func(c *gin.Context) {
+		uploadsDir := filepath.Clean(config.App.UploadsDir) + string(os.PathSeparator)
+		fp := filepath.Clean(filepath.Join(config.App.UploadsDir, filepath.FromSlash(c.Param("filepath"))))
+		if !strings.HasPrefix(fp, uploadsDir) {
+			c.AbortWithStatus(http.StatusForbidden)
+			return
+		}
 		c.Header("Content-Disposition", "attachment")
 		c.Header("X-Content-Type-Options", "nosniff")
-		c.File(filepath.Join(config.App.UploadsDir, c.Param("filepath")))
+		c.File(fp)
 	})
 
 	// health
@@ -105,8 +137,8 @@ func main() {
 	auth := r.Group("/api/auth")
 	auth.POST("/login", middleware.LoginRateLimiter(), authH.Login)
 	auth.POST("/refresh", authH.Refresh)
-	auth.POST("/forgot-password", authH.ForgotPassword)
-	auth.POST("/reset-password", authH.ResetPassword)
+	auth.POST("/forgot-password", middleware.LoginRateLimiter(), authH.ForgotPassword)
+	auth.POST("/reset-password", middleware.LoginRateLimiter(), authH.ResetPassword)
 	auth.Use(middleware.AuthRequired())
 	auth.POST("/logout", authH.Logout)
 	auth.POST("/change-password", authH.ChangePassword)

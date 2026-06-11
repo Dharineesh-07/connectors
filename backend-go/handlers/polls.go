@@ -153,6 +153,17 @@ func (h *PollsHandler) Vote(c *gin.Context) {
 		return
 	}
 
+	// Deduplicate submitted option IDs.
+	seen := map[string]bool{}
+	unique := req.OptionIDs[:0]
+	for _, oid := range req.OptionIDs {
+		if !seen[oid] {
+			seen[oid] = true
+			unique = append(unique, oid)
+		}
+	}
+	req.OptionIDs = unique
+
 	if !poll.IsMultiple && len(req.OptionIDs) != 1 {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": "single-choice poll requires exactly 1 option"})
 		return

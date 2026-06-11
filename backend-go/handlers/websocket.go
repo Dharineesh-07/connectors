@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"regexp"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -41,11 +43,50 @@ type WSHandler struct {
 	SFU         *sfu.SFU
 }
 
+// connRateLimiter is a simple token-bucket limiter per connection.
+// It allows burst events and then enforces a per-second cap.
+type connRateLimiter struct {
+	mu       sync.Mutex
+	tokens   int
+	max      int
+	lastFill time.Time
+	perSec   int
+}
+
+func newConnRateLimiter(perSec, burst int) *connRateLimiter {
+	return &connRateLimiter{tokens: burst, max: burst, perSec: perSec, lastFill: time.Now()}
+}
+
+func (r *connRateLimiter) Allow() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := time.Now()
+	elapsed := now.Sub(r.lastFill).Seconds()
+	r.lastFill = now
+	r.tokens += int(elapsed * float64(r.perSec))
+	if r.tokens > r.max {
+		r.tokens = r.max
+	}
+	if r.tokens <= 0 {
+		return false
+	}
+	r.tokens--
+	return true
+}
+
+var hexColorRe = regexp.MustCompile(`^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$`)
+
+var validWhiteboardTools = map[string]bool{
+	"pen": true, "eraser": true, "highlighter": true,
+	"line": true, "arrow": true, "rect": true, "circle": true,
+}
+
 // callSession holds the per-connection WebRTC state: a writer that targets this
 // exact socket and the SFU peers this connection owns (one per joined room).
 type callSession struct {
-	send  sfu.SendFunc
-	peers map[string]*sfu.Peer
+	send    sfu.SendFunc
+	peers   map[string]*sfu.Peer
+	limiter *connRateLimiter
 }
 
 type inboundEvent struct {
@@ -54,28 +95,41 @@ type inboundEvent struct {
 }
 
 func (h *WSHandler) Connect(c *gin.Context) {
-	tokenStr := c.Query("token")
-	if tokenStr == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"detail": "missing token"})
-		return
-	}
-	claims, err := utils.DecodeToken(tokenStr)
-	if err != nil || claims.Type != "access" {
-		c.JSON(http.StatusUnauthorized, gin.H{"detail": "invalid token"})
-		return
-	}
-	var user models.User
-	if err := database.DB.Where("id = ? AND is_active = ?", claims.Sub, true).First(&user).Error; err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"detail": "user not found"})
-		return
-	}
-
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		log.Printf("ws upgrade error: %v", err)
 		return
 	}
 	defer conn.Close()
+
+	// Authenticate via the first message so the token never appears in the URL
+	// (and therefore never in server/proxy access logs).
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	var authMsg struct {
+		Type  string `json:"type"`
+		Token string `json:"token"`
+	}
+	if err := conn.ReadJSON(&authMsg); err != nil || authMsg.Type != "ws:auth" || authMsg.Token == "" {
+		// 4002 = auth handshake timed out or malformed (not an invalid token).
+		// The client must NOT treat this as a token error and force-refresh.
+		conn.WriteMessage(websocket.CloseMessage,
+			websocket.FormatCloseMessage(4002, "auth handshake failed"))
+		return
+	}
+	conn.SetReadDeadline(time.Time{})
+
+	claims, err := utils.DecodeToken(authMsg.Token)
+	if err != nil || claims.Type != "access" {
+		conn.WriteMessage(websocket.CloseMessage,
+			websocket.FormatCloseMessage(4001, "invalid token"))
+		return
+	}
+	var user models.User
+	if err := database.DB.Where("id = ? AND is_active = ?", claims.Sub, true).First(&user).Error; err != nil {
+		conn.WriteMessage(websocket.CloseMessage,
+			websocket.FormatCloseMessage(4001, "user not found"))
+		return
+	}
 
 	// Keepalive: server pings every 54 s; client must pong within 60 s or
 	// the read deadline fires and the connection is torn down. This ensures
@@ -162,7 +216,8 @@ func (h *WSHandler) Connect(c *gin.Context) {
 		send: func(eventType string, data interface{}) {
 			h.WS.SendToConn(user.ID, conn, eventType, data)
 		},
-		peers: make(map[string]*sfu.Peer),
+		peers:   make(map[string]*sfu.Peer),
+		limiter: newConnRateLimiter(30, 60), // 30 events/sec, burst of 60
 	}
 
 	// read loop
@@ -279,6 +334,17 @@ func (h *WSHandler) broadcastPresence(user *models.User, eventType string) {
 }
 
 func (h *WSHandler) handleEvent(user *models.User, sess *callSession, event inboundEvent) {
+	// Rate-limit high-frequency events per connection to prevent event floods.
+	switch event.Type {
+	case "message:typing", "user:status",
+		"whiteboard:stroke", "whiteboard:cursor", "whiteboard:shape",
+		"whiteboard:note_add", "whiteboard:note_move", "whiteboard:note_edit",
+		"whiteboard:note_delete", "whiteboard:cursor_leave", "whiteboard:text", "whiteboard:image":
+		if !sess.limiter.Allow() {
+			return
+		}
+	}
+
 	switch event.Type {
 	case "user:status":
 		h.handleUserStatus(user, event.Data)
@@ -513,11 +579,14 @@ func (h *WSHandler) handleCallReject(user *models.User, data json.RawMessage) {
 		return
 	}
 
+	// Verify the user is actually an invited participant of this call.
+	var participant models.CallParticipant
+	if database.DB.Where("call_id = ? AND user_id = ? AND status = ?", d.CallID, user.ID, "invited").First(&participant).Error != nil {
+		return
+	}
+
 	now := time.Now()
-	// Mark only this participant as having rejected the call.
-	database.DB.Model(&models.CallParticipant{}).
-		Where("call_id = ? AND user_id = ?", d.CallID, user.ID).
-		Update("status", "rejected")
+	database.DB.Model(&participant).Update("status", "rejected")
 
 	var call models.Call
 	if database.DB.First(&call, "id = ?", d.CallID).Error != nil {
@@ -600,6 +669,21 @@ func (h *WSHandler) handleWhiteboardStroke(user *models.User, data json.RawMessa
 	if err := json.Unmarshal(data, &d); err != nil || d.ConversationID == "" {
 		return
 	}
+	// Validate tool, color, size, and coordinate bounds.
+	if !validWhiteboardTools[d.Tool] && d.Tool != "" {
+		return
+	}
+	if d.Color != "" && !hexColorRe.MatchString(d.Color) {
+		return
+	}
+	if d.Size < 0.5 || d.Size > 200 {
+		return
+	}
+	const maxCoord = 1e6
+	if d.From.X < -maxCoord || d.From.X > maxCoord || d.From.Y < -maxCoord || d.From.Y > maxCoord ||
+		d.To.X < -maxCoord || d.To.X > maxCoord || d.To.Y < -maxCoord || d.To.Y > maxCoord {
+		return
+	}
 	var membership models.ConversationMember
 	if database.DB.Where("conversation_id = ? AND user_id = ?", d.ConversationID, user.ID).First(&membership).Error != nil {
 		return
@@ -653,6 +737,20 @@ func (h *WSHandler) handleCallEnd(user *models.User, data json.RawMessage) {
 
 	var call models.Call
 	if database.DB.Preload("Participants").First(&call, "id = ?", d.CallID).Error != nil {
+		return
+	}
+
+	// only the initiator or a joined participant may end the call
+	authorized := call.InitiatedBy == user.ID
+	if !authorized {
+		for _, p := range call.Participants {
+			if p.UserID == user.ID && p.Status == "joined" {
+				authorized = true
+				break
+			}
+		}
+	}
+	if !authorized {
 		return
 	}
 

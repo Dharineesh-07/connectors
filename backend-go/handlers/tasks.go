@@ -30,6 +30,14 @@ func (h *TasksHandler) Create(c *gin.Context) {
 	}
 	user := middleware.CurrentUser(c)
 
+	if req.ConversationID != nil {
+		var m models.ConversationMember
+		if database.DB.Where("conversation_id = ? AND user_id = ?", *req.ConversationID, user.ID).First(&m).Error != nil {
+			c.JSON(http.StatusForbidden, gin.H{"detail": "not a member of that conversation"})
+			return
+		}
+	}
+
 	task := &models.Task{
 		Title:          req.Title,
 		Description:    req.Description,
@@ -60,7 +68,7 @@ func (h *TasksHandler) List(c *gin.Context) {
 	status := c.Query("status")
 	convID := c.Query("conversation_id")
 
-	query := database.DB.Where("created_by = ? OR assigned_to = ?", user.ID, user.ID).
+	query := database.DB.Where("created_by_id = ? OR assigned_to_id = ?", user.ID, user.ID).
 		Preload("CreatedBy").
 		Preload("AssignedTo").
 		Preload("Conversation").
@@ -116,7 +124,7 @@ func (h *TasksHandler) Update(c *gin.Context) {
 		updates["status"] = *req.Status
 	}
 	if req.AssignedToID != nil {
-		updates["assigned_to"] = *req.AssignedToID
+		updates["assigned_to_id"] = *req.AssignedToID
 	}
 	if req.DueDate != nil {
 		updates["due_date"] = *req.DueDate

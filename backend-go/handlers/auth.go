@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -37,17 +38,20 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": err.Error()})
 		return
 	}
-	access, err := h.Service.RefreshAccessToken(req.RefreshToken)
+	resp, err := h.Service.RefreshTokens(req.RefreshToken)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"detail": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"access_token": access})
+	c.JSON(http.StatusOK, resp)
 }
 
 func (h *AuthHandler) Logout(c *gin.Context) {
 	user := middleware.CurrentUser(c)
-	h.Service.Logout(user.ID)
+	if err := h.Service.Logout(user.ID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to invalidate session"})
+		return
+	}
 	c.Status(http.StatusNoContent)
 }
 
@@ -95,6 +99,11 @@ func (h *AuthHandler) ResetPassword(c *gin.Context) {
 		return
 	}
 	if err := h.Service.ResetPassword(req.Email, req.OTP, req.NewPassword); err != nil {
+		if errors.Is(err, services.ErrTokenRevocationFailed) {
+			// Password was changed; only session invalidation failed (Redis unavailable).
+			c.JSON(http.StatusOK, gin.H{"warning": err.Error()})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"detail": err.Error()})
 		return
 	}

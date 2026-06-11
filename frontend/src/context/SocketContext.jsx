@@ -26,6 +26,7 @@ async function refreshAccessToken() {
 
   const data = await response.json()
   localStorage.setItem('orgchat_access_token', data.access_token)
+  if (data.refresh_token) localStorage.setItem('orgchat_refresh_token', data.refresh_token)
   return data.access_token
 }
 
@@ -93,24 +94,28 @@ export function SocketProvider({ children }) {
       if (!token || !alive) return
 
       const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
-      const ws = new WebSocket(`${proto}://${window.location.host}/ws/connect?token=${token}`)
+      const ws = new WebSocket(`${proto}://${window.location.host}/ws/connect`)
       wsRef.current = ws
 
       ws.onopen = () => {
-        if (alive) {
-          setConnected(true)
-          setReconnecting(false)
-          setPresenceReady(false)
-        }
+        if (!alive) return
+        // Send token as first message so it never appears in the URL / access logs.
+        ws.send(JSON.stringify({ type: 'ws:auth', token }))
+        setReconnecting(false)
+        setPresenceReady(false)
+        // setConnected(true) is deferred until the server echoes connection:established
       }
 
       ws.onclose = (event) => {
         if (!alive) return
         setConnected(false)
         setPresenceReady(false)
+        // 4001 = server rejected the token as invalid → force a token refresh.
+        // 4002 = auth handshake timed out (token is fine) → just reconnect.
         if (event.code === 4001) forceRefreshRef.current = true
         setReconnecting(true)
-        reconnectTimer.current = setTimeout(connect, event.code === 4001 ? 500 : 3000)
+        const delay = event.code === 4001 ? 500 : event.code === 4002 ? 1000 : 3000
+        reconnectTimer.current = setTimeout(connect, delay)
       }
 
       ws.onerror = () => {
@@ -121,7 +126,9 @@ export function SocketProvider({ children }) {
         try {
           const msg = JSON.parse(event.data)
           
-          if (msg.type === 'presence:snapshot') {
+          if (msg.type === 'connection:established') {
+            if (alive) setConnected(true)
+          } else if (msg.type === 'presence:snapshot') {
             const users = msg.data?.users ?? []
             const newStatuses = new Map()
             const newOnline = new Set()

@@ -161,7 +161,10 @@ func (h *WhiteboardHandler) SaveDraft(c *gin.Context) {
 
 	// Reload the canonical row so the response carries the real id + timestamps
 	// (on conflict the generated insert id is discarded by the DB).
-	database.DB.Where("conversation_id = ? AND created_by_id = ?", convID, user.ID).First(&draft)
+	if err := database.DB.Where("conversation_id = ? AND created_by_id = ?", convID, user.ID).First(&draft).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "draft saved but could not be reloaded"})
+		return
+	}
 
 	c.JSON(http.StatusOK, buildDraftResp(draft))
 }
@@ -183,8 +186,14 @@ func (h *WhiteboardHandler) PublishDraft(c *gin.Context) {
 		return
 	}
 
-	database.DB.Model(&draft).Update("is_saved", true)
-	database.DB.Where("conversation_id = ? AND created_by_id = ?", convID, user.ID).First(&draft)
+	if err := database.DB.Model(&draft).Update("is_saved", true).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to publish draft"})
+		return
+	}
+	if err := database.DB.Where("conversation_id = ? AND created_by_id = ?", convID, user.ID).First(&draft).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "draft published but could not be reloaded"})
+		return
+	}
 
 	c.JSON(http.StatusOK, buildDraftResp(draft))
 }

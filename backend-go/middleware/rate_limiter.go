@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/orgchat/backend/store"
+	"github.com/redis/go-redis/v9"
 )
 
 // in-memory fallback when Redis is unavailable
@@ -38,18 +39,27 @@ func LoginRateLimiter() gin.HandlerFunc {
 	}
 }
 
+// incrWithExpiry atomically increments a counter and sets its TTL on first
+// creation, preventing a permanent key if the EXPIRE command were lost.
+var incrWithExpiry = redis.NewScript(`
+local count = redis.call("INCR", KEYS[1])
+if count == 1 then
+    redis.call("EXPIRE", KEYS[1], ARGV[1])
+end
+return count
+`)
+
 func redisAllow(key string, limit int, window time.Duration) bool {
 	ctx := context.Background()
 	if store.RDB == nil {
 		return memAllow(key, limit, window)
 	}
-	pipe := store.RDB.Pipeline()
-	incr := pipe.Incr(ctx, key)
-	pipe.Expire(ctx, key, window)
-	if _, err := pipe.Exec(ctx); err != nil {
+	windowSecs := int64(window.Seconds())
+	count, err := incrWithExpiry.Run(ctx, store.RDB, []string{key}, windowSecs).Int64()
+	if err != nil {
 		return memAllow(key, limit, window)
 	}
-	return incr.Val() <= int64(limit)
+	return count <= int64(limit)
 }
 
 func memAllow(key string, limit int, window time.Duration) bool {

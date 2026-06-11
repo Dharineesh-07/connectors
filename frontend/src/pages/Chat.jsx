@@ -237,7 +237,12 @@ export default function Chat() {
         let failed = 0
         for (const { convId, msgData } of queue) {
           try {
-            await sendMessage(convId, msgData)
+            let payload = msgData
+            if (e2eeActive && e2eeReady && msgData.type === 'text' && msgData.content) {
+              const encryptedContent = await e2eeEncrypt(msgData.content)
+              payload = { ...msgData, content: encryptedContent, is_encrypted: true }
+            }
+            await sendMessage(convId, payload)
           } catch {
             failed++
           }
@@ -247,7 +252,7 @@ export default function Chat() {
         }
       })()
     }
-  }, [connected, conversationId])
+  }, [connected, conversationId, e2eeActive, e2eeReady, e2eeEncrypt])
 
   const handleSend = useCallback(async (msgData) => {
     if (!isOnline || !connected) {
@@ -340,7 +345,7 @@ export default function Chat() {
     if (!conversationId) return
     try {
       const data = await initiateCall(conversationId, callType)
-      startRTC(data.call_id, conversationId, callType, data.room, data.conversation_type, user.id)
+      startRTC(data.call_id, conversationId, callType, data.room, data.conversation_type, user?.id)
     } catch (err) {
       const detail = err.response?.data?.detail || err.message || 'Could not start call'
       const activeCallId = err.response?.data?.active_call_id

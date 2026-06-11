@@ -1,0 +1,73 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: orgchat
+      POSTGRES_USER: orgchat
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orgchat -d orgchat"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  # TURN server for WebRTC NAT traversal.
+  # Uses host networking so it can bind relay ports directly — required for coturn.
+  coturn:
+    image: coturn/coturn:4-alpine
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+
+  backend:
+    build:
+      context: ./backend-go
+    restart: unless-stopped
+    env_file: ./backend-go/.env
+    environment:
+      # Override localhost URLs from .env to use Docker service names
+      DATABASE_URL: "host=postgres port=5432 user=orgchat password=${POSTGRES_PASSWORD} dbname=orgchat sslmode=disable TimeZone=UTC"
+      REDIS_URL: "redis://redis:6379"
+    ports:
+      - "50000:50000/udp"
+    volumes:
+      - uploads_data:/app/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_BACKEND_URL: ${VITE_BACKEND_URL}
+        VITE_BACKEND_WS_URL: ${VITE_BACKEND_WS_URL}
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
+  redis_data:
+  uploads_data:

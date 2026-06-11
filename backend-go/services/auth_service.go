@@ -5,7 +5,9 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,6 +17,11 @@ import (
 	"github.com/orgchat/backend/utils"
 	"gorm.io/gorm"
 )
+
+// ErrTokenRevocationFailed is returned when a password reset succeeds but the
+// old refresh tokens could not be revoked (e.g. Redis is temporarily unavailable).
+// Callers should treat this as a warning, not a hard failure — the password was changed.
+var ErrTokenRevocationFailed = errors.New("password reset succeeded but could not invalidate all active sessions")
 
 type AuthService struct{}
 
@@ -77,28 +84,50 @@ func (s *AuthService) Login(email, password string) (*LoginResponse, error) {
 	return &LoginResponse{AccessToken: access, RefreshToken: refresh, User: &user}, nil
 }
 
-func (s *AuthService) RefreshAccessToken(refreshToken string) (string, error) {
+type RefreshResponse struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+}
+
+func (s *AuthService) RefreshTokens(refreshToken string) (*RefreshResponse, error) {
 	claims, err := utils.DecodeToken(refreshToken)
 	if err != nil || claims.Type != "refresh" {
-		return "", errors.New("invalid refresh token")
+		return nil, errors.New("invalid refresh token")
 	}
-	if !utils.ValidateRefreshToken(claims.Sub, refreshToken) {
-		return "", errors.New("refresh token revoked")
+	// Atomically consume the old token — prevents replay and concurrent reuse.
+	if !utils.ConsumeRefreshToken(claims.Sub, refreshToken) {
+		return nil, errors.New("refresh token revoked")
 	}
 	var user models.User
 	if err := database.DB.Where("id = ? AND is_active = ?", claims.Sub, true).First(&user).Error; err != nil {
-		return "", errors.New("user not found")
+		return nil, errors.New("user not found")
 	}
-	return utils.CreateAccessToken(user.ID)
+	access, err := utils.CreateAccessToken(user.ID)
+	if err != nil {
+		return nil, err
+	}
+	newRefresh, err := utils.CreateRefreshToken(user.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err := utils.StoreRefreshToken(user.ID, newRefresh); err != nil {
+		return nil, err
+	}
+	return &RefreshResponse{AccessToken: access, RefreshToken: newRefresh}, nil
 }
 
-func (s *AuthService) Logout(userID string) {
-	utils.RevokeRefreshToken(userID)
-	database.DB.Model(&models.User{}).Where("id = ?", userID).Updates(map[string]interface{}{
+func (s *AuthService) Logout(userID string) error {
+	if err := utils.RevokeRefreshToken(userID); err != nil {
+		return err
+	}
+	if err := database.DB.Model(&models.User{}).Where("id = ?", userID).Updates(map[string]interface{}{
 		"is_online": false,
 		"status":    "offline",
 		"last_seen": time.Now(),
-	})
+	}).Error; err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *AuthService) ChangePassword(userID, currentPassword, newPassword string) error {
@@ -116,7 +145,13 @@ func (s *AuthService) ChangePassword(userID, currentPassword, newPassword string
 	if err != nil {
 		return err
 	}
-	return database.DB.Model(&user).Update("password_hash", hash).Error
+	if err := database.DB.Model(&user).Update("password_hash", hash).Error; err != nil {
+		return err
+	}
+	if err := utils.RevokeRefreshToken(userID); err != nil {
+		log.Printf("error: could not revoke refresh tokens after password change for user %s: %v", userID, err)
+	}
+	return nil
 }
 
 func (s *AuthService) RequestPasswordReset(email string) error {
@@ -147,16 +182,44 @@ func (s *AuthService) RequestPasswordReset(email string) error {
 	return nil
 }
 
+const otpMaxAttempts = 5
+const otpLockoutDuration = 5 * time.Minute
+
+func (s *AuthService) recordOTPFailure(email string) {
+	if store.RDB == nil {
+		return
+	}
+	ctx := context.Background()
+	attemptsKey := "otp:attempts:" + email
+	lockKey := "otp:locked:" + email
+	n, _ := store.RDB.Incr(ctx, attemptsKey).Result()
+	store.RDB.Expire(ctx, attemptsKey, otpLockoutDuration)
+	if n >= int64(otpMaxAttempts) {
+		store.RDB.Set(ctx, lockKey, strconv.FormatInt(n, 10), otpLockoutDuration)
+		store.RDB.Del(ctx, attemptsKey)
+	}
+}
+
 func (s *AuthService) ResetPassword(email, otp, newPassword string) error {
+	// Check lockout before touching the DB.
+	if store.RDB != nil {
+		lockKey := "otp:locked:" + email
+		if locked, _ := store.RDB.Exists(context.Background(), lockKey).Result(); locked > 0 {
+			return errors.New("too many failed attempts, please try again in 5 minutes")
+		}
+	}
+
 	var record models.PasswordResetOTP
 	if err := database.DB.Where("email = ? AND otp = ?", email, otp).First(&record).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			s.recordOTPFailure(email)
 			return errors.New("invalid or expired OTP")
 		}
 		return err
 	}
 	if time.Now().After(record.ExpiresAt) {
 		database.DB.Delete(&record)
+		s.recordOTPFailure(email)
 		return errors.New("OTP has expired")
 	}
 	if err := utils.ValidatePasswordStrength(newPassword); err != nil {
@@ -165,6 +228,13 @@ func (s *AuthService) ResetPassword(email, otp, newPassword string) error {
 	hash, err := utils.HashPassword(newPassword)
 	if err != nil {
 		return err
+	}
+
+	// Fetch the user ID before the transaction so it's available for token
+	// revocation even if a post-commit query were to fail.
+	var user models.User
+	if err := database.DB.Where("email = ?", email).First(&user).Error; err != nil {
+		return errors.New("user not found")
 	}
 
 	tx := database.DB.Begin()
@@ -185,13 +255,15 @@ func (s *AuthService) ResetPassword(email, otp, newPassword string) error {
 		return err
 	}
 
-	// revoke refresh token for the user
-	var user models.User
-	if database.DB.Where("email = ?", email).First(&user).Error == nil {
-		utils.RevokeRefreshToken(user.ID)
+	if err := utils.RevokeRefreshToken(user.ID); err != nil {
+		log.Printf("error: could not revoke refresh tokens after password reset for user %s: %v", user.ID, err)
+		return ErrTokenRevocationFailed
 	}
 	if store.RDB != nil {
-		store.RDB.Del(context.Background(), "otp:"+email)
+		ctx := context.Background()
+		store.RDB.Del(ctx, "otp:"+email)
+		store.RDB.Del(ctx, "otp:attempts:"+email)
+		store.RDB.Del(ctx, "otp:locked:"+email)
 	}
 	return nil
 }

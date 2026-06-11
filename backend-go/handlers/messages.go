@@ -3,6 +3,8 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"html"
 	"io"
 	"net"
 	"net/http"
@@ -495,7 +497,37 @@ func (h *MessagesHandler) GetLinkPreview(c *gin.Context) {
 		}
 	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	// Use a custom dialer that re-checks the resolved IP at connection time so
+	// a DNS rebinding attack (TTL=0 domain flipping to a private IP after the
+	// isSafeURL pre-flight) is blocked at the socket layer.
+	safeTransport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+			ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+			if err != nil || len(ips) == 0 {
+				return nil, fmt.Errorf("dns lookup failed for %s", host)
+			}
+			for _, ip := range ips {
+				if isPrivateIP(ip.IP) {
+					return nil, fmt.Errorf("resolved IP %s is not allowed", ip.IP)
+				}
+			}
+			dialer := &net.Dialer{Timeout: 5 * time.Second}
+			var lastErr error
+			for _, ip := range ips {
+				var conn net.Conn
+				conn, lastErr = dialer.DialContext(ctx, network, net.JoinHostPort(ip.IP.String(), port))
+				if lastErr == nil {
+					return conn, nil
+				}
+			}
+			return nil, lastErr
+		},
+	}
+	client := &http.Client{Timeout: 5 * time.Second, Transport: safeTransport}
 	req, _ := http.NewRequest("GET", rawURL, nil)
 	req.Header.Set("User-Agent", "OrgChatBot/1.0 (link preview)")
 	resp, err := client.Do(req)
@@ -505,21 +537,28 @@ func (h *MessagesHandler) GetLinkPreview(c *gin.Context) {
 	}
 	defer resp.Body.Close()
 
-	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 50*1024))
+	// Reject responses that declare themselves too large before reading the body.
+	const maxBodyBytes = 50 * 1024
+	if resp.ContentLength > maxBodyBytes {
+		c.JSON(http.StatusOK, linkPreviewResult{URL: rawURL})
+		return
+	}
+
+	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	body := string(bodyBytes)
 
 	result := linkPreviewResult{
 		URL:         rawURL,
-		Title:       extractOG(body, ogTitle),
-		Description: extractOG(body, ogDesc),
+		Title:       html.EscapeString(extractOG(body, ogTitle)),
+		Description: html.EscapeString(extractOG(body, ogDesc)),
 		Image:       extractOG(body, ogImage),
-		SiteName:    extractOG(body, ogSite),
+		SiteName:    html.EscapeString(extractOG(body, ogSite)),
 	}
 	if result.Title == "" {
-		result.Title = extractOG(body, titleTag)
+		result.Title = html.EscapeString(extractOG(body, titleTag))
 	}
 	if result.SiteName == "" {
-		result.SiteName = parsed.Host
+		result.SiteName = html.EscapeString(parsed.Host)
 	}
 
 	if store.RDB != nil {

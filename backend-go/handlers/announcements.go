@@ -27,6 +27,11 @@ func (h *AnnouncementsHandler) List(c *gin.Context) {
 
 func (h *AnnouncementsHandler) TogglePin(c *gin.Context) {
 	annID := c.Param("announcement_id")
+	user := middleware.CurrentUser(c)
+	if user.Role != "admin" {
+		c.JSON(http.StatusForbidden, gin.H{"detail": "only admins can pin announcements"})
+		return
+	}
 
 	var ann models.Announcement
 	if err := database.DB.First(&ann, "id = ?", annID).Error; err != nil {
@@ -39,7 +44,10 @@ func (h *AnnouncementsHandler) TogglePin(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update announcement"})
 		return
 	}
-	database.DB.Preload("Author").First(&ann, "id = ?", annID)
+	if err := database.DB.Preload("Author").First(&ann, "id = ?", annID).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "announcement updated but could not be reloaded"})
+		return
+	}
 
 	h.WS.Broadcast("announcement:updated", ann)
 	c.JSON(http.StatusOK, ann)
@@ -54,6 +62,10 @@ func (h *AnnouncementsHandler) Create(c *gin.Context) {
 		return
 	}
 	user := middleware.CurrentUser(c)
+	if user.Role != "admin" {
+		c.JSON(http.StatusForbidden, gin.H{"detail": "only admins can create announcements"})
+		return
+	}
 
 	ann := &models.Announcement{
 		AuthorID: user.ID,
@@ -63,7 +75,10 @@ func (h *AnnouncementsHandler) Create(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
 		return
 	}
-	database.DB.Preload("Author").First(ann, "id = ?", ann.ID)
+	if err := database.DB.Preload("Author").First(ann, "id = ?", ann.ID).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "announcement created but could not be reloaded"})
+		return
+	}
 
 	h.WS.Broadcast("announcement:new", ann)
 	c.JSON(http.StatusCreated, ann)
