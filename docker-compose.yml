@@ -1,16 +1,9 @@
-# Only Redis runs in Docker. Postgres, the Go backend, and the frontend all run
-# natively on the host (see README for the dev workflow).
-#
-#   docker compose up -d      # start Redis (localhost:6379)
-#   docker compose down       # stop it
 services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
     volumes:
       - redis_data:/data
-    ports:
-      - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -18,5 +11,47 @@ services:
       retries: 5
       start_period: 10s
 
+  # TURN server for WebRTC NAT traversal.
+  # Uses host networking so it can bind relay ports directly — required for coturn.
+  coturn:
+    image: coturn/coturn:4-alpine
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+
+  backend:
+    build:
+      context: ./backend-go
+    restart: unless-stopped
+    env_file: ./backend-go/.env
+    environment:
+      # Postgres runs on the host — DATABASE_URL in backend-go/.env must use
+      # host.docker.internal (resolves to the host machine from inside the container)
+      REDIS_URL: "redis://redis:6379"
+    # Allows containers to reach the host machine as host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "50000:50000/udp"
+    volumes:
+      - uploads_data:/app/uploads
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_BACKEND_URL: https://yourdomain.com
+        VITE_BACKEND_WS_URL: wss://yourdomain.com
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
 volumes:
   redis_data:
+  uploads_data:
