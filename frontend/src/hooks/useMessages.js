@@ -9,6 +9,12 @@ export function useMessages(conversationId) {
   const [loading, setLoading] = useState(false)
   const cursorRef = useRef(null)
   const connectedOnceRef = useRef(false)
+  const mountedRef = useRef(true)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
 
   const load = useCallback(
     async (reset = false) => {
@@ -16,15 +22,16 @@ export function useMessages(conversationId) {
       setLoading(true)
       try {
         const data = await listMessages(conversationId, reset ? null : cursorRef.current)
+        if (!mountedRef.current) return
+        const incoming = data.messages ?? []
         setHasMore(data.has_more)
         if (data.next_cursor) cursorRef.current = data.next_cursor
-        const incoming = data.messages
         setMessages((prev) => (reset ? incoming : [...incoming, ...prev]))
         if (reset) {
           markConversationRead(conversationId).catch(() => {})
         }
       } finally {
-        setLoading(false)
+        if (mountedRef.current) setLoading(false)
       }
     },
     [conversationId]

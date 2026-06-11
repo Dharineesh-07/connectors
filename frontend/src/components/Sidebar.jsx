@@ -717,7 +717,7 @@ export default function Sidebar({ isOpen, onClose }) {
       .then(setDirectory)
       .catch(() => toast.error('Could not load people'))
       .finally(() => setDirectoryLoading(false))
-  }, [composerMode, directory.length, directoryLoading])
+  }, [composerMode, directory.length])
 
   useEffect(() => {
     const off1 = on('message:new', (data) => {

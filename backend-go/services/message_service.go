@@ -2,6 +2,7 @@ package services
 
 import (
 	"errors"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -46,10 +47,13 @@ func (s *MessageService) requireMember(convID, userID string) error {
 	return nil
 }
 
-func (s *MessageService) getMemberRole(convID, userID string) string {
+func (s *MessageService) getMemberRole(convID, userID string) (string, error) {
 	var member models.ConversationMember
-	database.DB.Where("conversation_id = ? AND user_id = ?", convID, userID).First(&member)
-	return member.Role
+	err := database.DB.Where("conversation_id = ? AND user_id = ?", convID, userID).First(&member).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", nil // not a member — role is empty, callers check role != "admin"
+	}
+	return member.Role, err // propagate real DB errors; role="" on error
 }
 
 func (s *MessageService) GetUserConversations(userID string, archived bool) ([]ConversationListItem, error) {
@@ -128,8 +132,12 @@ func (s *MessageService) GetUserConversations(userID string, archived bool) ([]C
 }
 
 func (s *MessageService) ClearConversation(convID, userID string) error {
-	if err := s.requireMember(convID, userID); err != nil {
+	role, err := s.getMemberRole(convID, userID)
+	if err != nil {
 		return err
+	}
+	if role != "admin" {
+		return errors.New("only conversation admins can clear messages")
 	}
 	deletedContent := "This message was deleted"
 	return database.DB.Model(&models.Message{}).
@@ -287,7 +295,11 @@ func (s *MessageService) createGroup(creatorID string, userIDs []string, name, a
 }
 
 func (s *MessageService) UpdateConversation(convID, userID string, updates map[string]interface{}) (*models.Conversation, error) {
-	if s.getMemberRole(convID, userID) != "admin" {
+	role, err := s.getMemberRole(convID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if role != "admin" {
 		return nil, errors.New("only admins can update the conversation")
 	}
 	allowed := []string{"name", "avatar_url", "is_private", "mention_permission", "waiting_room_enabled"}
@@ -304,7 +316,11 @@ func (s *MessageService) UpdateConversation(convID, userID string, updates map[s
 }
 
 func (s *MessageService) AddMembers(convID, adminID string, userIDs []string) error {
-	if s.getMemberRole(convID, adminID) != "admin" {
+	role, err := s.getMemberRole(convID, adminID)
+	if err != nil {
+		return err
+	}
+	if role != "admin" {
 		return errors.New("only admins can add members")
 	}
 	tx := database.DB.Begin()
@@ -334,9 +350,26 @@ func (s *MessageService) JoinConversation(convID, userID string) error {
 }
 
 func (s *MessageService) RemoveMember(convID, requesterID, targetUserID string) error {
-	role := s.getMemberRole(convID, requesterID)
+	role, err := s.getMemberRole(convID, requesterID)
+	if err != nil {
+		return err
+	}
 	if requesterID != targetUserID && role != "admin" {
 		return errors.New("only admins can remove other members")
+	}
+	// Prevent removing the last admin — the group would be orphaned with no one able to manage it.
+	targetRole, err := s.getMemberRole(convID, targetUserID)
+	if err != nil {
+		return err
+	}
+	if targetRole == "admin" {
+		var adminCount int64
+		database.DB.Model(&models.ConversationMember{}).
+			Where("conversation_id = ? AND role = ?", convID, "admin").
+			Count(&adminCount)
+		if adminCount <= 1 {
+			return errors.New("cannot remove the last admin; promote another member first")
+		}
 	}
 	return database.DB.Where("conversation_id = ? AND user_id = ?", convID, targetUserID).Delete(&models.ConversationMember{}).Error
 }
@@ -394,7 +427,9 @@ func (s *MessageService) GetMessages(convID, userID string, beforeID *string, li
 	if beforeID != nil && *beforeID != "" {
 		var ref models.Message
 		if err := database.DB.First(&ref, "id = ?", *beforeID).Error; err == nil {
-			query = query.Where("created_at < ?", ref.CreatedAt)
+			// Composite cursor: messages strictly before the anchor, with ties broken
+			// by ID so same-second messages are never skipped or duplicated.
+			query = query.Where("(created_at < ? OR (created_at = ? AND id < ?))", ref.CreatedAt, ref.CreatedAt, ref.ID)
 		}
 	}
 
@@ -515,8 +550,11 @@ func (s *MessageService) processMentionBroadcast(convID, senderID, content strin
 	if err := database.DB.First(&conv, "id = ?", convID).Error; err != nil {
 		return
 	}
-	if conv.MentionPermission == "admins_only" && s.getMemberRole(convID, senderID) != "admin" {
-		return
+	if conv.MentionPermission == "admins_only" {
+		senderRole, err := s.getMemberRole(convID, senderID)
+		if err != nil || senderRole != "admin" {
+			return
+		}
 	}
 
 	payload := map[string]interface{}{
@@ -569,7 +607,10 @@ func (s *MessageService) DeleteMessage(msgID, requesterID string) (*models.Messa
 	if err := database.DB.First(&msg, "id = ?", msgID).Error; err != nil {
 		return nil, errors.New("message not found")
 	}
-	role := s.getMemberRole(msg.ConversationID, requesterID)
+	role, err := s.getMemberRole(msg.ConversationID, requesterID)
+	if err != nil {
+		return nil, err
+	}
 	if msg.SenderID != requesterID && role != "admin" {
 		return nil, errors.New("permission denied")
 	}
@@ -630,8 +671,10 @@ func (s *MessageService) SearchMessages(convID, userID, query string) ([]models.
 	if err := s.requireMember(convID, userID); err != nil {
 		return nil, err
 	}
+	// Escape LIKE wildcards so user input is treated as literal text.
+	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(query)
 	var msgs []models.Message
-	database.DB.Where("conversation_id = ? AND is_deleted = ? AND content LIKE ?", convID, false, "%"+query+"%").
+	database.DB.Where("conversation_id = ? AND is_deleted = ? AND content LIKE ?", convID, false, "%"+escaped+"%").
 		Preload("Sender").
 		Order("created_at DESC").
 		Limit(50).
@@ -836,8 +879,18 @@ func (s *MessageService) DeleteScheduledMessage(id, userID string) error {
 }
 
 func (s *MessageService) ProcessScheduledMessages() []models.Message {
+	// Atomically claim unsent due messages in a single UPDATE so concurrent
+	// runners (e.g. rolling restart) cannot double-deliver the same message.
 	var due []models.ScheduledMessage
-	database.DB.Where("sent = ? AND scheduled_at <= ?", false, time.Now()).Find(&due)
+	// RETURNING * is PostgreSQL-specific. If the DB is not PostgreSQL this will
+	// log an error and return no messages rather than silently double-delivering.
+	if err := database.DB.Raw(
+		"UPDATE scheduled_messages SET sent = true WHERE sent = false AND scheduled_at <= ? RETURNING *",
+		time.Now(),
+	).Scan(&due).Error; err != nil {
+		log.Printf("error: failed to claim scheduled messages: %v", err)
+		return nil
+	}
 
 	var sent []models.Message
 	for _, sm := range due {
@@ -845,7 +898,6 @@ func (s *MessageService) ProcessScheduledMessages() []models.Message {
 		if err == nil {
 			sent = append(sent, *msg)
 		}
-		database.DB.Model(&sm).Update("sent", true)
 	}
 	return sent
 }

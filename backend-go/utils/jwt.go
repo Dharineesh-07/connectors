@@ -11,6 +11,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/orgchat/backend/config"
 	"github.com/orgchat/backend/store"
+	"github.com/redis/go-redis/v9"
 )
 
 type Claims struct {
@@ -43,7 +44,7 @@ func CreateRefreshToken(userID string) (string, error) {
 
 func DecodeToken(tokenStr string) (*Claims, error) {
 	token, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(t *jwt.Token) (interface{}, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+		if t.Method != jwt.SigningMethodHS256 {
 			return nil, errors.New("unexpected signing method")
 		}
 		return []byte(config.App.SecretKey), nil
@@ -62,7 +63,7 @@ func DecodeToken(tokenStr string) (*Claims, error) {
 // enabling multiple concurrent sessions (multi-device login).
 func refreshTokenKey(userID, token string) string {
 	sum := sha256.Sum256([]byte(token))
-	return fmt.Sprintf("refresh:%s:%x", userID, sum[:8])
+	return fmt.Sprintf("refresh:%s:%x", userID, sum[:])
 }
 
 func StoreRefreshToken(userID, token string) error {
@@ -78,17 +79,39 @@ func StoreRefreshToken(userID, token string) error {
 	return nil
 }
 
-func ValidateRefreshToken(userID, token string) bool {
+// consumeRefreshToken atomically validates and deletes the token so the same
+// token cannot be used twice (token rotation). Returns true if the token was
+// present and consumed.
+var consumeScript = redis.NewScript(`
+local val = redis.call("GET", KEYS[1])
+if val == "1" then
+    redis.call("DEL", KEYS[1])
+    return 1
+end
+return 0
+`)
+
+func ConsumeRefreshToken(userID, token string) bool {
 	if store.RDB == nil {
 		return false
 	}
-	val, err := store.RDB.Get(context.Background(), refreshTokenKey(userID, token)).Result()
-	return err == nil && val == "1"
+	ctx := context.Background()
+	n, err := consumeScript.Run(ctx, store.RDB, []string{refreshTokenKey(userID, token)}).Int64()
+	if err == nil && n == 1 {
+		return true
+	}
+	// Backward compat: tokens stored before the key format was extended to the
+	// full SHA-256 digest (was sum[:8] → 16 hex chars). Accept them so existing
+	// sessions survive the deploy; they will naturally expire within 7 days.
+	sum := sha256.Sum256([]byte(token))
+	legacyKey := fmt.Sprintf("refresh:%s:%x", userID, sum[:8])
+	n, err = consumeScript.Run(ctx, store.RDB, []string{legacyKey}).Int64()
+	return err == nil && n == 1
 }
 
-func RevokeRefreshToken(userID string) {
+func RevokeRefreshToken(userID string) error {
 	if store.RDB == nil {
-		return
+		return nil
 	}
 	ctx := context.Background()
 	pattern := fmt.Sprintf("refresh:%s:*", userID)
@@ -96,14 +119,17 @@ func RevokeRefreshToken(userID string) {
 	for {
 		keys, next, err := store.RDB.Scan(ctx, cursor, pattern, 100).Result()
 		if err != nil {
-			break
+			return err
 		}
 		if len(keys) > 0 {
-			store.RDB.Del(ctx, keys...)
+			if err := store.RDB.Del(ctx, keys...).Err(); err != nil {
+				return err
+			}
 		}
 		cursor = next
 		if cursor == 0 {
 			break
 		}
 	}
+	return nil
 }

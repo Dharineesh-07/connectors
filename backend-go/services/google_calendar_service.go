@@ -2,7 +2,12 @@ package services
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
+	"errors"
+	"strings"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -36,8 +41,15 @@ func (s *GoogleCalendarService) oauthConfig() *oauth2.Config {
 	}
 }
 
+func (s *GoogleCalendarService) stateHMAC(userID string) string {
+	mac := hmac.New(sha256.New, []byte(config.App.SecretKey))
+	mac.Write([]byte(userID))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
 func (s *GoogleCalendarService) GetAuthURL(userID string) string {
-	state := base64.RawURLEncoding.EncodeToString([]byte(userID))
+	raw := userID + ":" + s.stateHMAC(userID)
+	state := base64.RawURLEncoding.EncodeToString([]byte(raw))
 	return s.oauthConfig().AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.ApprovalForce)
 }
 
@@ -46,7 +58,15 @@ func (s *GoogleCalendarService) DecodeState(state string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return string(b), nil
+	parts := strings.SplitN(string(b), ":", 2)
+	if len(parts) != 2 {
+		return "", errors.New("invalid state format")
+	}
+	userID, sig := parts[0], parts[1]
+	if !hmac.Equal([]byte(sig), []byte(s.stateHMAC(userID))) {
+		return "", errors.New("invalid state signature")
+	}
+	return userID, nil
 }
 
 func (s *GoogleCalendarService) ExchangeCode(ctx context.Context, code string) (*oauth2.Token, error) {

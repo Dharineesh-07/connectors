@@ -22,6 +22,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/orgchat/backend/config"
@@ -57,6 +58,7 @@ type Room struct {
 	mu          sync.RWMutex
 	peers       map[*Peer]struct{}
 	trackLocals map[string]*webrtc.TrackLocalStaticRTP // local track ID -> forwarder
+	retrying    int32                                   // 1 when a backoff goroutine is already in-flight
 }
 
 // Peer is one client's server-side PeerConnection within a room.
@@ -374,6 +376,9 @@ func (p *Peer) Close() {
 	p.mu.Unlock()
 
 	r := p.room
+	if r == nil {
+		return
+	}
 	r.mu.Lock()
 	delete(r.peers, p)
 	r.mu.Unlock()
@@ -513,11 +518,15 @@ func (r *Room) signalPeerConnections() {
 
 	for attempt := 0; ; attempt++ {
 		if attempt == 25 {
-			// Give negotiation room to settle, then retry.
-			go func() {
-				time.Sleep(3 * time.Second)
-				r.signalPeerConnections()
-			}()
+			// Give negotiation room to settle, then retry — but only spawn one
+			// backoff goroutine at a time to prevent unbounded goroutine growth.
+			if atomic.CompareAndSwapInt32(&r.retrying, 0, 1) {
+				go func() {
+					defer atomic.StoreInt32(&r.retrying, 0)
+					time.Sleep(3 * time.Second)
+					r.signalPeerConnections()
+				}()
+			}
 			return
 		}
 		if !attemptSync() {

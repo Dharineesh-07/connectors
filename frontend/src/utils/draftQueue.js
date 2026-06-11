@@ -33,13 +33,18 @@ export async function loadDraftQueue(conversationId) {
 export async function saveDraftQueue(conversationId, items) {
   try {
     const db = await openDB()
-    const tx = db.transaction(STORE, 'readwrite')
-    const store = tx.objectStore(STORE)
-    if (items.length === 0) {
-      store.delete(conversationId)
-    } else {
-      store.put(items, conversationId)
-    }
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE, 'readwrite')
+      const store = tx.objectStore(STORE)
+      if (items.length === 0) {
+        store.delete(conversationId)
+      } else {
+        store.put(items, conversationId)
+      }
+      tx.oncomplete = resolve
+      tx.onerror = () => reject(tx.error)
+      tx.onabort = () => reject(tx.error)
+    })
   } catch {
     // silently ignore — draft persistence is best-effort
   }

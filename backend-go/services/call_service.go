@@ -264,6 +264,14 @@ func (s *CallService) LeaveCall(callID, userID string) (*models.Call, error) {
 }
 
 func (s *CallService) GetCallHistory(userID string, page, limit int, callType, status, dateFrom, dateTo string) (*CallListResponse, error) {
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 {
+		limit = 20
+	} else if limit > 100 {
+		limit = 100
+	}
 	query := database.DB.Model(&models.Call{}).
 		Joins("JOIN call_participants ON call_participants.call_id = calls.id").
 		Where("call_participants.user_id = ?", userID).
@@ -298,6 +306,14 @@ func (s *CallService) GetCallHistory(userID string, page, limit int, callType, s
 }
 
 func (s *CallService) AdminGetCallHistory(page, limit int, callType, status, dateFrom, dateTo string) (*CallListResponse, error) {
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 {
+		limit = 20
+	} else if limit > 100 {
+		limit = 100
+	}
 	query := database.DB.Model(&models.Call{}).
 		Preload("Participants.User").
 		Preload("Initiator")

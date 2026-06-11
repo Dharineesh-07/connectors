@@ -128,10 +128,13 @@ func (h *MeetingsHandler) Join(c *gin.Context) {
 	}
 
 	var att models.MeetingAttendee
-	if database.DB.Where("meeting_id = ? AND user_id = ?", meetingID, user.ID).First(&att).Error != nil {
-		database.DB.Create(&models.MeetingAttendee{MeetingID: meetingID, UserID: user.ID, Status: "accepted"})
-	} else {
-		database.DB.Model(&att).Update("status", "accepted")
+	if err := database.DB.Where("meeting_id = ? AND user_id = ?", meetingID, user.ID).First(&att).Error; err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"detail": "you were not invited to this meeting"})
+		return
+	}
+	if err := database.DB.Model(&att).Update("status", "accepted").Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to update attendee status"})
+		return
 	}
 
 	if meeting.Status == "scheduled" {

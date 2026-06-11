@@ -87,6 +87,7 @@ func (m *Manager) SendToUser(userID, eventType string, data interface{}) {
 	m.mu.RUnlock()
 
 	payload, _ := json.Marshal(Event{Type: eventType, Data: data})
+	var failed []*websocket.Conn
 	for _, e := range entries {
 		// Serialize writes per connection; Gorilla WebSocket forbids concurrent writers.
 		e.mu.Lock()
@@ -94,8 +95,14 @@ func (m *Manager) SendToUser(userID, eventType string, data interface{}) {
 		if err := e.conn.WriteMessage(websocket.TextMessage, payload); err != nil {
 			log.Printf("ws: failed to send %q to user %s: %v", eventType, userID, err)
 			e.conn.Close()
+			failed = append(failed, e.conn)
 		}
 		e.mu.Unlock()
+	}
+	// Unregister outside the write loop so Unregister (which takes m.mu.Lock)
+	// is never called while e.mu is still held, avoiding a lock-ordering hazard.
+	for _, conn := range failed {
+		m.Unregister(userID, conn)
 	}
 }
 
@@ -146,11 +153,15 @@ func (m *Manager) SendToConn(userID string, conn *websocket.Conn, eventType stri
 	payload, _ := json.Marshal(Event{Type: eventType, Data: data})
 	entry.mu.Lock()
 	entry.conn.SetWriteDeadline(time.Now().Add(writeWait))
-	if err := entry.conn.WriteMessage(websocket.TextMessage, payload); err != nil {
-		log.Printf("ws: failed to send %q to a connection of user %s: %v", eventType, userID, err)
+	writeErr := entry.conn.WriteMessage(websocket.TextMessage, payload)
+	if writeErr != nil {
 		entry.conn.Close()
 	}
 	entry.mu.Unlock()
+	if writeErr != nil {
+		log.Printf("ws: failed to send %q to a connection of user %s: %v", eventType, userID, writeErr)
+		m.Unregister(userID, conn)
+	}
 }
 
 // PingConn sends a WebSocket ping under the same per-connection lock as every

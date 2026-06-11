@@ -37,9 +37,25 @@ func (h *AdminHandler) CreateUser(c *gin.Context) {
 	c.JSON(http.StatusCreated, user)
 }
 
+func clampPage(raw, defaultLimit int) (page, limit int) {
+	page = raw
+	limit = defaultLimit
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	return
+}
+
 func (h *AdminHandler) ListUsers(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	pageRaw, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	limitRaw, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	page, limit := clampPage(pageRaw, limitRaw)
 	search := c.Query("search")
 	department := c.Query("department")
 	role := c.Query("role")
@@ -102,8 +118,9 @@ func (h *AdminHandler) ResetUserPassword(c *gin.Context) {
 }
 
 func (h *AdminHandler) GetAuditLogs(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	pageRaw, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	limitRaw, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	page, limit := clampPage(pageRaw, limitRaw)
 	adminID := c.Query("admin_id")
 	action := c.Query("action")
 	dateFrom := c.Query("date_from")
@@ -136,22 +153,35 @@ func (h *AdminHandler) Broadcast(c *gin.Context) {
 	}
 	admin := middleware.CurrentUser(c)
 
-	// get all active user IDs
-	users, _ := h.UserService.DirectoryUsers("", 10000)
-	for _, u := range users {
-		h.NotifService.CreateAndPush(u.ID, "broadcast", "Announcement", req.Content, nil)
+	const batchSize = 500
+	sent := 0
+	for offset := 0; ; offset += batchSize {
+		users, err := h.UserService.DirectoryUsersPage("", batchSize, offset)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": "failed to fetch recipients"})
+			return
+		}
+		for _, u := range users {
+			if _, err := h.NotifService.CreateAndPush(u.ID, "broadcast", "Announcement", req.Content, nil); err == nil {
+				sent++
+			}
+		}
+		if len(users) < batchSize {
+			break
+		}
 	}
 	h.UserService.LogAdminAction(nil, admin.ID, "broadcast", nil, map[string]interface{}{
 		"content":         req.Content,
-		"recipient_count": len(users),
+		"recipient_count": sent,
 	})
 	h.WS.Broadcast("notification:broadcast", gin.H{"content": req.Content, "from": admin.FullName})
-	c.Status(http.StatusNoContent)
+	c.JSON(http.StatusOK, gin.H{"recipient_count": sent})
 }
 
 func (h *AdminHandler) GetCallHistory(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	pageRaw, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	limitRaw, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	page, limit := clampPage(pageRaw, limitRaw)
 	result, err := h.CallService.AdminGetCallHistory(page, limit,
 		c.Query("type"), c.Query("status"), c.Query("date_from"), c.Query("date_to"))
 	if err != nil {

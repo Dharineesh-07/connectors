@@ -1,9 +1,12 @@
 package services
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"math/big"
 	"strings"
 	"time"
 
@@ -75,7 +78,16 @@ func (s *UserService) CreateUser(adminID string, email, fullName string, departm
 		return nil, errors.New("email already registered")
 	}
 
-	tempPassword := fmt.Sprintf("Temp%d!", time.Now().UnixNano()%100000)
+	const charset = "ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789"
+	buf := make([]byte, 12)
+	for i := range buf {
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
+		if err != nil {
+			return nil, err
+		}
+		buf[i] = charset[n.Int64()]
+	}
+	tempPassword := "T" + string(buf) + "1!"
 	hash, err := utils.HashPassword(tempPassword)
 	if err != nil {
 		return nil, err
@@ -116,9 +128,18 @@ func (s *UserService) CreateUser(adminID string, email, fullName string, departm
 }
 
 func (s *UserService) ListUsers(page, limit int, search, department string, isActive *bool, role string) (*UserListResponse, error) {
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 {
+		limit = 20
+	} else if limit > 100 {
+		limit = 100
+	}
 	query := database.DB.Model(&models.User{})
 	if search != "" {
-		like := "%" + search + "%"
+		escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(search)
+		like := "%" + escaped + "%"
 		query = query.Where("full_name LIKE ? OR email LIKE ?", like, like)
 	}
 	if department != "" {
@@ -178,7 +199,10 @@ func (s *UserService) UpdateUser(adminID, userID string, updates map[string]inte
 		tx.Rollback()
 		return nil, err
 	}
-	tx.Commit()
+	if err := tx.Commit().Error; err != nil {
+		tx.Rollback()
+		return nil, err
+	}
 	database.DB.First(&user, "id = ?", userID)
 	return &user, nil
 }
@@ -204,7 +228,9 @@ func (s *UserService) DeactivateUser(adminID, userID string) error {
 		tx.Rollback()
 		return err
 	}
-	utils.RevokeRefreshToken(userID)
+	if err := utils.RevokeRefreshToken(userID); err != nil {
+		log.Printf("warning: could not revoke refresh tokens for deactivated user %s: %v", userID, err)
+	}
 	return nil
 }
 
@@ -229,7 +255,9 @@ func (s *UserService) ResetUserPassword(adminID, userID, newPassword string) err
 		tx.Rollback()
 		return err
 	}
-	utils.RevokeRefreshToken(userID)
+	if err := utils.RevokeRefreshToken(userID); err != nil {
+		log.Printf("warning: could not revoke refresh tokens after admin password reset for user %s: %v", userID, err)
+	}
 	return nil
 }
 
@@ -280,11 +308,28 @@ func (s *UserService) GetStats() (*AdminStatsResponse, error) {
 func (s *UserService) DirectoryUsers(search string, limit int) ([]models.User, error) {
 	query := database.DB.Where("is_active = ?", true)
 	if search != "" {
-		like := "%" + search + "%"
+		escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(search)
+		like := "%" + escaped + "%"
 		query = query.Where("full_name LIKE ? OR email LIKE ?", like, like)
 	}
 	var users []models.User
-	query.Limit(limit).Find(&users)
+	if err := query.Limit(limit).Find(&users).Error; err != nil {
+		return nil, err
+	}
+	return users, nil
+}
+
+func (s *UserService) DirectoryUsersPage(search string, limit, offset int) ([]models.User, error) {
+	query := database.DB.Where("is_active = ?", true)
+	if search != "" {
+		escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(search)
+		like := "%" + escaped + "%"
+		query = query.Where("full_name LIKE ? OR email LIKE ?", like, like)
+	}
+	var users []models.User
+	if err := query.Limit(limit).Offset(offset).Find(&users).Error; err != nil {
+		return nil, err
+	}
 	return users, nil
 }
 
