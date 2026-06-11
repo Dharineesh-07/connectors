@@ -55,5 +55,3 @@ services:
 volumes:
   redis_data:
   uploads_data:
-
-  
