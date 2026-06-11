@@ -15,12 +15,24 @@ type seedUser struct {
 }
 
 var seedUsers = []seedUser{
-	{"admin@cnc.com", "Admin", "admin", "Admin@123!"},
-	{"alice.johnson@cnc.com", "Alice Johnson", "employee", "Alice@123!"},
-	{"bob.smith@cnc.com", "Bob Smith", "employee", "Bob@1234!"},
-	{"carol.white@cnc.com", "Carol White", "employee", "Carol@123!"},
-	{"david.lee@cnc.com", "David Lee", "employee", "David@123!"},
-	{"eva.martinez@cnc.com", "Eva Martinez", "employee", "Eva@12345!"},
+	{"admin@compunetconnections.com", "Admin", "admin", "Admin@1234$"},
+	{"ranjithp@compunetconnections.com", "Ranjith", "admin", "Ranjith@123"},
+	{"kalaimanir@compunetconnections.com", "Kalaimani", "employee", "Kalaimani@123"},
+	{"rahulr@compunetconnections.com", "Rahul", "employee", "Rahul@123"},
+	{"yaminidevip@compunet.work", "Yamini", "employee", "Yamini@123"},
+	{"akshayar@compunetconnections.com", "Akshaya", "employee", "Akshaya@123"},
+	{"ajeethaar@compunet.work", "Ajeetha", "employee", "Ajeetha@123"},
+	{"athreyans@compunetconnections.com", "Athreyan", "admin", "Athreyan@123"},
+	{"logeshwaranv@compunet.work", "Logeshwaran", "employee", "Logesh@123"},
+	{"praveenkumarr@compunet.work", "Praveen Kumar", "employee", "Praveen@123"},
+	{"karthikeyann@compunet.work", "Karthikeyan","employee", "Karthikeyan@123"},
+	{"ajithe@compunet.work", "Ajith","employee", "Ajith@123"},
+	{"antonyv@compunet.work", "Victor","employee", "Victor@123"},
+	{"mohanasundaris@compunet.work", "Mohanasundari", "employee", "Mohanasundari@123"},
+	{"santhoshkumard@compunet.work", "Santhosh Kumar", "employee", "Santhosh@123"},
+	{"sanjays@compunet.work", "Sanjay", "employee", "Sanjay@123"},
+	{"dharineeeshss@compunet.work", "Dharieesh", "employee", "Dharineesh@123"},
+	{"vijayaragavana@compunet.work", "Vijayaragavan", "employee", "Vijay@123"},
 }
 
 func Seed() {
