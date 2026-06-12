@@ -1,10 +1,10 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { 
-  EyeIcon, 
-  EyeSlashIcon, 
-  MoonIcon, 
-  SunIcon, 
+import {
+  EyeIcon,
+  EyeSlashIcon,
+  MoonIcon,
+  SunIcon,
   ArrowLeftIcon,
   KeyIcon,
   EnvelopeIcon,
@@ -13,7 +13,11 @@ import {
 import { useAuth } from '../context/AuthContext'
 import { useTheme } from '../context/ThemeContext'
 import { forgotPassword, resetPassword } from '../api/auth'
+import { listConversations } from '../api/conversations'
+import { listUsers } from '../api/users'
+import { setPrefetch } from '../utils/prefetchStore'
 import Logo from '../components/Logo'
+import Loader from '../components/Loader'
 import toast from 'react-hot-toast'
 
 const INPUT_STYLE = {
@@ -58,19 +62,21 @@ export default function Login() {
   const { login, user } = useAuth()
   const { theme, toggleTheme } = useTheme()
   const navigate = useNavigate()
+  const skipNavRef = useRef(false)
 
   useEffect(() => {
-    if (user) navigate('/', { replace: true })
+    if (user && !skipNavRef.current) navigate('/', { replace: true })
   }, [user])
-  
+
   const [view, setView] = useState('login') // 'login' | 'forgot' | 'reset'
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [otp, setOtp] = useState('')
   const [newPassword, setNewPassword] = useState('')
-  
+
   const [showPwd, setShowPwd] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [transitioning, setTransitioning] = useState(false)
   const [error, setError] = useState('')
   const [focused, setFocused] = useState('')
 
@@ -81,12 +87,25 @@ export default function Login() {
     e.preventDefault()
     setError('')
     setLoading(true)
+    skipNavRef.current = true
     try {
       await login(email, password)
-    } catch (err) {
-      setError(err.response?.data?.detail ?? 'Login failed. Check your credentials.')
-    } finally {
       setLoading(false)
+      setTransitioning(true)
+      const [[conversations, users]] = await Promise.all([
+        Promise.all([
+          listConversations().catch(() => null),
+          listUsers({ limit: 100 }).catch(() => null),
+        ]),
+        new Promise((r) => setTimeout(r, 3000)),
+      ])
+      setPrefetch({ conversations, users })
+      navigate('/', { replace: true })
+    } catch (err) {
+      skipNavRef.current = false
+      setTransitioning(false)
+      setLoading(false)
+      setError(err.response?.data?.detail ?? 'Login failed. Check your credentials.')
     }
   }
 
@@ -306,6 +325,10 @@ export default function Login() {
         </form>
       </div>
     )
+  }
+
+  if (transitioning) {
+    return <Loader variant="fullscreen" message="Setting up your workspace…" />
   }
 
   return (

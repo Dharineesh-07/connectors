@@ -8,6 +8,7 @@ import { useNavigate } from 'react-router-dom'
 import { getStats } from '../../api/admin'
 import { useAuth } from '../../context/AuthContext'
 import Logo from '../../components/Logo'
+import Loader from '../../components/Loader'
 
 const CARD_GRADIENTS = [
   'linear-gradient(135deg, #3399CC 0%, #2277AA 100%)',
@@ -118,10 +119,7 @@ export default function AdminDashboard() {
           </h2>
         </div>
         {isLoading ? (
-          <div className="flex items-center gap-3 text-cn-gray-400 text-sm py-8 justify-center">
-            <span className="animate-cn-spin inline-block w-5 h-5 border-2 border-cn-blue border-t-transparent rounded-full" />
-            Loading stats…
-          </div>
+          <Loader variant="block" />
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             {cards.map((c, i) => (

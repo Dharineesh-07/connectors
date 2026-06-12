@@ -16,14 +16,19 @@ type Message struct {
 	FileURL        *string    `gorm:"size:500" json:"file_url"`
 	FileName       *string    `gorm:"size:255" json:"file_name"`
 	FileSize       *int64     `json:"file_size"`
+	FileThumbnail  *string    `gorm:"type:text" json:"file_thumbnail"`
 	ReplyToID      *string    `gorm:"type:uuid" json:"reply_to_id"`
 	ThreadParentID *string    `gorm:"type:uuid;index" json:"thread_parent_id"`
 	PollID         *string    `gorm:"type:uuid;index" json:"poll_id"`
 	IsEdited       bool       `gorm:"default:false" json:"is_edited"`
 	IsDeleted      bool       `gorm:"default:false" json:"is_deleted"`
 	IsEncrypted    bool       `gorm:"default:false" json:"is_encrypted"`
+	FileExpired    bool       `gorm:"default:false" json:"file_expired"`
+	FileExpiresAt  *time.Time `json:"file_expires_at"`
 	CreatedAt      time.Time  `gorm:"index:idx_msg_conv_time" json:"created_at"`
 	UpdatedAt      time.Time  `json:"updated_at"`
+
+	ReplyCount int `gorm:"-" json:"reply_count"`
 
 	Sender        User              `gorm:"foreignKey:SenderID" json:"sender,omitempty"`
 	ReplyTo       *Message          `gorm:"foreignKey:ReplyToID" json:"reply_to,omitempty"`

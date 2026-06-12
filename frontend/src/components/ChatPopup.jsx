@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, Fragment, useCallback } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, Fragment, useCallback } from 'react'
 import { useQuery, useQueryClient } from 'react-query'
 import dayjs from 'dayjs'
 import toast from 'react-hot-toast'
@@ -18,6 +18,9 @@ import {
   editMessage,
   deleteMessage,
   reactToMessage,
+  pinMessage,
+  unpinMessage,
+  getPinnedMessages,
 } from '../api/messages'
 import { initiateCall } from '../api/calls'
 import { useMessages } from '../hooks/useMessages'
@@ -33,6 +36,7 @@ import ChatSidebarInfo from './ChatSidebarInfo'
 import ChatSidebarMembers from './ChatSidebarMembers'
 import ThreadPanel from './ThreadPanel'
 import ScheduleMessageModal from './ScheduleMessageModal'
+import TaskCreationModal from './TaskCreationModal'
 
 function getDateLabel(dateStr) {
   const msgDate = dayjs(dateStr)
@@ -47,13 +51,15 @@ export default function ChatPopup({ conversationId, minimized }) {
   const { emit } = useSocket()
   const { initiateCall: startRTC } = useCall()
   const { closeChat, minimizeChat, maximizeChat, updatePosition } = useChatPopup()
-  const { messages, updateMessage } = useMessages(conversationId)
+  const { messages, hasMore, loading, loadMore, updateMessage } = useMessages(conversationId)
   const queryClient = useQueryClient()
 
   const [showInfo, setShowInfo] = useState(false)
   const [showMembers, setShowMembers] = useState(false)
   const [threadMessage, setThreadMessage] = useState(null)
   const [showScheduleModal, setShowScheduleModal] = useState(false)
+  const [pinnedMessageIds, setPinnedMessageIds] = useState(new Set())
+  const [taskSourceMessage, setTaskSourceMessage] = useState(null)
 
   const currentThreadMessage = threadMessage
     ? messages.find((m) => m.id === threadMessage.id) ?? threadMessage
@@ -68,6 +74,10 @@ export default function ChatPopup({ conversationId, minimized }) {
   const [popupHeight, setPopupHeight] = useState(350)
   const bottomRef = useRef(null)
   const popupRef = useRef(null)
+  const scrollContainerRef = useRef(null)
+  const topSentinelRef = useRef(null)
+  const scrollHeightBeforeRef = useRef(null)
+  const scrollHandledRef = useRef(false)
 
   const handleResizeMouseDown = useCallback((e) => {
     e.preventDefault()
@@ -137,7 +147,7 @@ export default function ChatPopup({ conversationId, minimized }) {
   const { data: conversation } = useQuery(
     ['conversation', conversationId],
     () => getConversation(conversationId),
-    { enabled: !!conversationId }
+    { enabled: !!conversationId, staleTime: 30_000 }
   )
 
   const isDirect = conversation?.type === 'direct'
@@ -159,8 +169,44 @@ export default function ChatPopup({ conversationId, minimized }) {
     : { full_name: conversation?.name, avatar_url: conversation?.avatar_url }
 
   useEffect(() => {
-    if (!minimized) bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+    if (minimized) return
+    if (scrollHandledRef.current) { scrollHandledRef.current = false; return }
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages.length, minimized])
+
+  useLayoutEffect(() => {
+    if (scrollHeightBeforeRef.current === null || !scrollContainerRef.current) return
+    scrollContainerRef.current.scrollTop =
+      scrollContainerRef.current.scrollHeight - scrollHeightBeforeRef.current
+    scrollHeightBeforeRef.current = null
+    scrollHandledRef.current = true
+  }, [messages])
+
+  const handleLoadMore = useCallback(() => {
+    if (loading || !hasMore || !scrollContainerRef.current) return
+    scrollHeightBeforeRef.current = scrollContainerRef.current.scrollHeight
+    loadMore()
+  }, [loading, hasMore, loadMore])
+
+  useEffect(() => {
+    const sentinel = topSentinelRef.current
+    const container = scrollContainerRef.current
+    if (!sentinel || !container) return
+    const observer = new IntersectionObserver(
+      ([entry]) => { if (entry.isIntersecting) handleLoadMore() },
+      { root: container, threshold: 0 }
+    )
+    observer.observe(sentinel)
+    return () => observer.disconnect()
+  }, [handleLoadMore])
+
+  // Load pinned message ids
+  useEffect(() => {
+    if (!conversationId) return
+    getPinnedMessages(conversationId)
+      .then((pins) => setPinnedMessageIds(new Set(pins.map((p) => p.message_id))))
+      .catch(() => {})
+  }, [conversationId])
 
   // Clear state when conversation changes
   useEffect(() => {
@@ -195,6 +241,7 @@ export default function ChatPopup({ conversationId, minimized }) {
         file_url: uploaded.url,
         file_name: uploaded.file_name,
         file_size: uploaded.file_size,
+        file_thumbnail: uploaded.thumbnail || null,
       })
       queryClient.invalidateQueries(['conversation-attachments', conversationId])
     } catch {
@@ -214,6 +261,11 @@ export default function ChatPopup({ conversationId, minimized }) {
     } catch {
       toast.error('Failed to send voice message')
     }
+  }
+
+  const handleAskResend = (msg) => {
+    const name = msg.file_name ? `"${msg.file_name}"` : 'the file'
+    handleSend({ type: 'text', content: `Can you resend ${name}? It has expired.` })
   }
 
   const handleTyping = (isTyping) => {
@@ -261,6 +313,22 @@ export default function ChatPopup({ conversationId, minimized }) {
     }
   }
 
+  const handlePin = async (message, currentlyPinned) => {
+    try {
+      if (currentlyPinned) {
+        await unpinMessage(conversationId, message.id)
+        setPinnedMessageIds((prev) => { const next = new Set(prev); next.delete(message.id); return next })
+        toast.success('Message unpinned')
+      } else {
+        await pinMessage(conversationId, message.id)
+        setPinnedMessageIds((prev) => new Set([...prev, message.id]))
+        toast.success('Message pinned')
+      }
+    } catch {
+      toast.error('Could not update pin')
+    }
+  }
+
   const handleForward = async (message) => {
     setForwardMessage(message)
     try {
@@ -274,7 +342,16 @@ export default function ChatPopup({ conversationId, minimized }) {
   const handleForwardTo = async (targetConvId) => {
     if (!forwardMessage) return
     try {
-      await sendMessage(targetConvId, { content: forwardMessage.content, type: 'text' })
+      const isText = !forwardMessage.type || forwardMessage.type === 'text'
+      const payload = isText
+        ? { type: 'text', content: forwardMessage.content }
+        : {
+            type: forwardMessage.type,
+            file_url: forwardMessage.file_url,
+            file_name: forwardMessage.file_name,
+            file_size: forwardMessage.file_size,
+          }
+      await sendMessage(targetConvId, payload)
       toast.success('Message forwarded')
     } catch {
       toast.error('Forward failed')
@@ -421,9 +498,16 @@ export default function ChatPopup({ conversationId, minimized }) {
             /* Chat view */
             <>
               <div
+                ref={scrollContainerRef}
                 className="overflow-y-auto px-3 py-2 cn-chat-bg"
                 style={{ height: popupHeight }}
               >
+                <div ref={topSentinelRef} />
+                {loading && (
+                  <div className="text-center py-2">
+                    <span className="text-xs" style={{ color: 'var(--cn-gray-400)' }}>Loading…</span>
+                  </div>
+                )}
                 {messages.map((msg, index) => {
                   const msgDay = dayjs(msg.created_at).format('YYYY-MM-DD')
                   const prevDay = index > 0 ? dayjs(messages[index - 1].created_at).format('YYYY-MM-DD') : null
@@ -452,6 +536,11 @@ export default function ChatPopup({ conversationId, minimized }) {
                         onDelete={handleDelete}
                         onReact={handleReact}
                         onOpenThread={handleOpenThread}
+                        onPin={handlePin}
+                        isPinned={pinnedMessageIds.has(msg.id)}
+                        onCreateTask={(m) => setTaskSourceMessage(m)}
+                        conversationMembers={conversation?.members}
+                        onAskResend={handleAskResend}
                       />
                     </Fragment>
                   )
@@ -519,9 +608,16 @@ export default function ChatPopup({ conversationId, minimized }) {
               </button>
             </div>
             <div className="overflow-y-auto flex-1">
-              {forwardConversations
-                .filter((c) => c.id !== conversationId)
-                .map((c) => {
+              {(() => {
+                const opts = forwardConversations.filter((c) => c.id !== conversationId)
+                if (!opts.length) {
+                  return (
+                    <p className="text-center text-sm text-cn-gray-400 py-8 px-4">
+                      No other conversations to forward to
+                    </p>
+                  )
+                }
+                return opts.map((c) => {
                   const name =
                     c.type === 'direct'
                       ? c.members?.find((m) => m.user_id !== user?.id)?.user?.display_name ||
@@ -537,7 +633,8 @@ export default function ChatPopup({ conversationId, minimized }) {
                       {name}
                     </button>
                   )
-                })}
+                })
+              })()}
             </div>
           </div>
         </div>
@@ -549,6 +646,15 @@ export default function ChatPopup({ conversationId, minimized }) {
           onClose={() => setShowScheduleModal(false)}
         />
       )}
+      <TaskCreationModal
+        key={taskSourceMessage?.id}
+        isOpen={!!taskSourceMessage}
+        onClose={() => setTaskSourceMessage(null)}
+        prefillTitle={taskSourceMessage?.content?.slice(0, 120) ?? ''}
+        conversationId={conversationId}
+        messageId={taskSourceMessage?.id}
+        members={conversation?.members ?? []}
+      />
     </>
   )
 }

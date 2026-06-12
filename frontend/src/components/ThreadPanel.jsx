@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import dayjs from 'dayjs'
 import { XMarkIcon } from '@heroicons/react/24/outline'
 import UserAvatar from './UserAvatar'
-import { sendMessage } from '../api/messages'
+import { sendMessage, getThreadReplies } from '../api/messages'
 
 function ThreadReplyItem({ reply }) {
   const isDeleted = reply.is_deleted
@@ -73,10 +73,27 @@ function ParentMessage({ message }) {
 export default function ThreadPanel({ message, onClose, className }) {
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
+  const [replies, setReplies] = useState([])
   const bottomRef = useRef(null)
   const inputRef = useRef(null)
 
-  const replies = message?.thread_replies ?? []
+  // Fetch existing replies from API when thread opens
+  useEffect(() => {
+    if (!message?.id) return
+    setReplies(message?.thread_replies ?? [])
+    getThreadReplies(message.id).then(setReplies).catch(() => {})
+  }, [message?.id])
+
+  // Append new real-time replies pushed via WebSocket (avoid duplicates)
+  useEffect(() => {
+    const ws = message?.thread_replies ?? []
+    if (!ws.length) return
+    setReplies((prev) => {
+      const ids = new Set(prev.map((r) => r.id))
+      const newOnes = ws.filter((r) => !ids.has(r.id))
+      return newOnes.length ? [...prev, ...newOnes] : prev
+    })
+  }, [message?.thread_replies])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })

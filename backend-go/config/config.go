@@ -20,6 +20,7 @@ type Config struct {
 	SecretKey          string
 	CompanyEmailDomain string
 	MaxFileSizeMB      int64
+	FileExpiryDays     int
 	UploadsDir         string
 	S3Bucket           string
 	S3Region           string
@@ -78,6 +79,7 @@ func Load() {
 	_ = godotenv.Load()
 
 	maxSize, _ := strconv.ParseInt(getEnv("MAX_FILE_SIZE_MB", "10"), 10, 64)
+	expiryDays, _ := strconv.Atoi(getEnv("FILE_EXPIRY_DAYS", "30"))
 	udpPort, _ := strconv.Atoi(getEnv("WEBRTC_UDP_PORT", "0"))
 
 	App = &Config{
@@ -86,6 +88,7 @@ func Load() {
 		SecretKey:          getEnv("SECRET_KEY", ""),
 		CompanyEmailDomain: getEnv("COMPANY_EMAIL_DOMAIN", ""),
 		MaxFileSizeMB:      maxSize,
+		FileExpiryDays:     expiryDays,
 		UploadsDir:         getEnv("UPLOADS_DIR", "./uploads"),
 		S3Bucket:           getEnv("S3_BUCKET", ""),
 		S3Region:           getEnv("S3_REGION", ""),

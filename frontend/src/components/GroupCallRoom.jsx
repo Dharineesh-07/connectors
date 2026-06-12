@@ -228,6 +228,70 @@ function RemoteAudio({ stream }) {
   return <audio ref={ref} autoPlay />
 }
 
+// Full-size screen share video rendered with contain so no content is clipped.
+function ScreenShareView({ tile }) {
+  const videoRef = useRef(null)
+  useEffect(() => {
+    const el = videoRef.current
+    if (!el) return
+    el.srcObject = tile.videoStream || null
+    return () => { if (el) el.srcObject = null }
+  }, [tile.videoStream])
+  return (
+    <video
+      ref={videoRef}
+      autoPlay
+      playsInline
+      muted={tile.isLocal}
+      style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block', background: '#000' }}
+    />
+  )
+}
+
+// Compact tile for the sidebar shown during screen sharing.
+function SidebarTile({ tile, isSpeaking, raised }) {
+  const videoRef = useRef(null)
+  useEffect(() => {
+    const el = videoRef.current
+    if (!el) return
+    el.srcObject = tile.videoStream || null
+    return () => { if (el) el.srcObject = null }
+  }, [tile.videoStream])
+  const showVideo = tile.videoStream && !tile.videoMuted
+  return (
+    <div
+      className="cn-tile"
+      data-speaking={isSpeaking ? 'true' : 'false'}
+      style={{ height: 110, flexShrink: 0, borderRadius: 10 }}
+    >
+      {showVideo ? (
+        <video
+          ref={videoRef}
+          autoPlay
+          playsInline
+          muted={tile.isLocal}
+          style={{
+            width: '100%', height: '100%', objectFit: 'cover',
+            transform: tile.isLocal && !tile.isDesktop ? 'scaleX(-1)' : 'none',
+          }}
+        />
+      ) : (
+        <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div className="cn-avatar" style={{ width: 38, height: 38, fontSize: 15 }}>{avatarContent(tile)}</div>
+        </div>
+      )}
+      <div className="cn-tile-name" style={{ fontSize: 10 }}>
+        {tile.name || 'Participant'}{tile.isLocal ? ' (You)' : ''}
+      </div>
+      {raised && (
+        <div style={{ position: 'absolute', top: 4, right: 4, zIndex: 10, color: '#fbbf24' }}>
+          <HandRaisedIcon style={{ width: 14, height: 14 }} />
+        </div>
+      )}
+    </div>
+  )
+}
+
 function TileGrid({ tiles, speakingId, raisedHands, localHandRaised, localId }) {
   const cols = gridColumns(tiles.length)
   return (
@@ -563,8 +627,14 @@ function RoomContent({
   const [floatingReactions, setFloatingReactions] = useState([]) // [{id, emoji, x}]
   const [showReactionPicker, setShowReactionPicker] = useState(false)
   const [showWaitingRoom, setShowWaitingRoom] = useState(false)
+  const [remoteScreenSharers, setRemoteScreenSharers] = useState(new Set())
 
-  // Incoming raise-hand / reaction signals from other participants.
+  // Broadcast local screen-share state so peers can update their layout.
+  useEffect(() => {
+    call.sendSignal({ type: 'screen_share', active: call.screenSharing })
+  }, [call.screenSharing, call])
+
+  // Incoming raise-hand / reaction / screen-share signals from other participants.
   useEffect(() => {
     call.registerSignalHandler((fromId, fromName, data) => {
       try {
@@ -578,6 +648,13 @@ function RoomContent({
           const x = 20 + Math.random() * 60
           setFloatingReactions((prev) => [...prev, { id, emoji: data.emoji, x }])
           setTimeout(() => setFloatingReactions((prev) => prev.filter((r) => r.id !== id)), 2500)
+        } else if (data?.type === 'screen_share') {
+          setRemoteScreenSharers((prev) => {
+            const next = new Set(prev)
+            if (data.active) next.add(fromId)
+            else next.delete(fromId)
+            return next
+          })
         }
       } catch (e) {
         console.error('signal handler error:', e)
@@ -609,6 +686,13 @@ function RoomContent({
       localId={call.localId}
     />
   )
+
+  // Determine if anyone is screen sharing and who — used to switch to the
+  // Slack-style focused layout (big screen left, participants sidebar right).
+  const sharingTile = call.screenSharing
+    ? call.tiles.find((t) => t.isLocal)
+    : call.tiles.find((t) => remoteScreenSharers.has(t.id))
+  const isAnyoneSharing = !!sharingTile
 
   // Floating reaction emojis overlay. Rendered in BOTH the fullscreen and
   // minimized views (the PiP previously omitted it, so reactions sent by other
@@ -807,7 +891,7 @@ function RoomContent({
         </button>
       </div>
 
-      {/* Participant tiles */}
+      {/* Participant tiles / screen share */}
       <div style={{ flex: 1, minHeight: 0, overflow: 'hidden', position: 'relative', zIndex: 1 }}>
         <div style={{
           position: 'absolute', inset: 0,
@@ -818,9 +902,50 @@ function RoomContent({
           position: 'absolute', inset: 0, zIndex: 0, pointerEvents: 'none',
           background: 'radial-gradient(ellipse at 20% 30%, rgba(139,92,246,0.1) 0%, transparent 60%), radial-gradient(ellipse at 80% 70%, rgba(56,189,248,0.08) 0%, transparent 60%)',
         }} />
-        <div style={{ position: 'relative', zIndex: 1, height: '100%' }}>
-          {grid}
-        </div>
+        {isAnyoneSharing ? (
+          // Slack-style: big screen left, participant strip right
+          <div style={{ position: 'relative', zIndex: 1, height: '100%', display: 'flex' }}>
+            {/* Main screen area */}
+            <div style={{ flex: 1, minWidth: 0, position: 'relative', background: '#080810', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <ScreenShareView tile={sharingTile} />
+              {/* "X is presenting" badge */}
+              <div style={{
+                position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)',
+                background: 'rgba(13,8,26,0.72)', backdropFilter: 'blur(8px)',
+                border: '1px solid rgba(139,92,246,0.35)',
+                borderRadius: 8, padding: '4px 14px',
+                color: '#c4b5fd', fontSize: 12, fontWeight: 600,
+                letterSpacing: 0.3, whiteSpace: 'nowrap', pointerEvents: 'none', zIndex: 5,
+              }}>
+                {sharingTile.name}{sharingTile.isLocal ? ' (You)' : ''} is presenting
+              </div>
+            </div>
+            {/* Participant sidebar */}
+            <div style={{
+              width: 188, flexShrink: 0,
+              display: 'flex', flexDirection: 'column', gap: 6,
+              padding: '8px 8px', overflowY: 'auto',
+              background: 'rgba(10,6,22,0.85)',
+              borderLeft: '1px solid rgba(139,92,246,0.2)',
+            }}>
+              {call.tiles.map((tile) => {
+                const raised = tile.id === call.localId ? handRaised : !!raisedHands[tile.id]?.raised
+                return (
+                  <SidebarTile
+                    key={tile.id}
+                    tile={tile}
+                    isSpeaking={tile.id === call.speakingId}
+                    raised={raised}
+                  />
+                )
+              })}
+            </div>
+          </div>
+        ) : (
+          <div style={{ position: 'relative', zIndex: 1, height: '100%' }}>
+            {grid}
+          </div>
+        )}
       </div>
 
       {/* Floating reactions */}

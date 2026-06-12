@@ -48,6 +48,106 @@ function isImageFile(fileName) {
   return IMAGE_EXTS.has(ext)
 }
 
+function LockIcon() {
+  return (
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="white" style={{ filter: 'drop-shadow(0 1px 3px rgba(0,0,0,0.5))' }}>
+      <path d="M12 1C9.24 1 7 3.24 7 6v1H5a2 2 0 00-2 2v11a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-2V6c0-2.76-2.24-5-5-5zm0 2c1.66 0 3 1.34 3 3v1H9V6c0-1.66 1.34-3 3-3zm0 9a2 2 0 110 4 2 2 0 010-4z"/>
+    </svg>
+  )
+}
+
+function ExpiredImageBubble({ message, isOwn, onOpen }) {
+  const thumb = message.file_thumbnail
+  return (
+    <div
+      className={`relative rounded-2xl overflow-hidden cursor-pointer ${isOwn ? 'rounded-br-sm' : 'rounded-bl-sm'}`}
+      style={{ width: 220, height: 160, boxShadow: isOwn ? '0 4px 14px rgba(204,51,51,0.35)' : 'var(--shadow-card)' }}
+      onClick={onOpen}
+    >
+      {thumb ? (
+        <img
+          src={thumb}
+          alt=""
+          className="w-full h-full object-cover"
+          style={{ filter: 'blur(12px) brightness(0.6)', transform: 'scale(1.1)' }}
+        />
+      ) : (
+        <div className="w-full h-full" style={{ background: '#444' }} />
+      )}
+      <div className="absolute inset-0 flex flex-col items-center justify-center gap-1">
+        <LockIcon />
+        <span className="text-white text-[11px] font-semibold" style={{ textShadow: '0 1px 3px rgba(0,0,0,0.7)' }}>
+          Photo expired
+        </span>
+      </div>
+    </div>
+  )
+}
+
+function ExpiredFileBubble({ message, isOwn, onOpen }) {
+  return (
+    <div
+      className={`rounded-2xl px-4 py-3 flex flex-col items-center gap-1.5 min-w-[160px] cursor-pointer ${isOwn ? 'rounded-br-sm' : 'rounded-bl-sm'}`}
+      style={{
+        ...(isOwn
+          ? { background: 'linear-gradient(135deg, #CC3333 0%, #A52266 100%)', boxShadow: '0 4px 14px rgba(204,51,51,0.35)' }
+          : { background: 'var(--cn-gray-200)', border: '1.5px solid var(--cn-gray-400)', boxShadow: 'var(--shadow-card)' }),
+        opacity: 0.75,
+      }}
+      onClick={onOpen}
+    >
+      <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${isOwn ? 'bg-white/15' : 'bg-cn-gray-300'}`}>
+        <LockIcon />
+      </div>
+      <p className={`text-xs font-semibold text-center ${isOwn ? 'text-white/80' : 'text-cn-gray-600'}`}>
+        {message.file_name || 'File'} expired
+      </p>
+    </div>
+  )
+}
+
+function ExpiredModal({ message, isOwn, senderName, onClose, onAskResend }) {
+  return ReactDOM.createPortal(
+    <div
+      className="fixed inset-0 flex items-end justify-center z-50 pb-8 px-4"
+      style={{ background: 'rgba(0,0,0,0.45)' }}
+      onClick={onClose}
+    >
+      <div
+        className="bg-cn-white rounded-2xl p-5 w-full max-w-sm flex flex-col items-center gap-3"
+        style={{ boxShadow: '0 8px 40px rgba(0,0,0,0.22)' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <span className="text-3xl">{message.type === 'image' ? '🖼️' : '📄'}</span>
+        <p className="text-sm font-semibold text-cn-gray-800 text-center">
+          This {message.type === 'image' ? 'photo' : 'file'} is no longer available
+        </p>
+        <p className="text-xs text-cn-gray-500 text-center leading-relaxed">
+          {isOwn
+            ? 'You sent this file. It has expired and can no longer be downloaded.'
+            : `Ask ${senderName} to resend it.`}
+        </p>
+        {!isOwn && (
+          <button
+            onClick={() => { onAskResend?.(); onClose() }}
+            className="w-full py-2.5 rounded-xl text-sm font-semibold text-white"
+            style={{ background: 'linear-gradient(135deg, #CC3333 0%, #A52266 100%)' }}
+          >
+            Ask to Resend
+          </button>
+        )}
+        <button
+          onClick={onClose}
+          className="w-full py-2 rounded-xl text-sm text-cn-gray-500 hover:bg-cn-gray-100"
+        >
+          Dismiss
+        </button>
+      </div>
+    </div>,
+    document.body
+  )
+}
+
 function ReceiptTicks({ receipts, currentUserId }) {
   const others = receipts?.filter((r) => r.user_id !== currentUserId) ?? []
   const allRead = others.length > 0 && others.every((r) => r.status === 'read')
@@ -123,9 +223,11 @@ function MessageBubble({
   conversationMembers,
   onPollUpdate,
   decrypt,
+  onAskResend,
 }) {
   const [lightboxOpen, setLightboxOpen] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
+  const [resendModalOpen, setResendModalOpen] = useState(false)
   const [hovered, setHovered] = useState(false)
   const [isEditing, setIsEditing] = useState(false)
   const [editText, setEditText] = useState('')
@@ -421,29 +523,44 @@ function MessageBubble({
               />
             </div>
           ) : isImage && !isDeleted ? (
-            <>
-              <div
-                className={`rounded-2xl overflow-hidden cursor-pointer transition-transform duration-150 hover:scale-[1.02] ${
-                  isOwn ? 'rounded-br-sm' : 'rounded-bl-sm'
-                }`}
-                style={{ boxShadow: isOwn ? '0 4px 14px rgba(204,51,51,0.35)' : 'var(--shadow-card)' }}
-                onClick={() => setLightboxOpen(true)}
-              >
-                <img
-                  src={message.file_url}
-                  alt={message.file_name}
-                  className="block max-w-[240px] max-h-[200px] w-full object-cover"
-                  loading="lazy"
-                />
-              </div>
-              {lightboxOpen && (
-                <ImageLightbox
-                  src={message.file_url}
-                  alt={message.file_name}
-                  onClose={() => setLightboxOpen(false)}
-                />
-              )}
-            </>
+            message.file_expired ? (
+              <>
+                <ExpiredImageBubble message={message} isOwn={isOwn} onOpen={() => setResendModalOpen(true)} />
+                {resendModalOpen && (
+                  <ExpiredModal
+                    message={message}
+                    isOwn={isOwn}
+                    senderName={message.sender?.display_name || message.sender?.full_name}
+                    onClose={() => setResendModalOpen(false)}
+                    onAskResend={() => onAskResend?.(message)}
+                  />
+                )}
+              </>
+            ) : (
+              <>
+                <div
+                  className={`rounded-2xl overflow-hidden cursor-pointer transition-transform duration-150 hover:scale-[1.02] ${
+                    isOwn ? 'rounded-br-sm' : 'rounded-bl-sm'
+                  }`}
+                  style={{ boxShadow: isOwn ? '0 4px 14px rgba(204,51,51,0.35)' : 'var(--shadow-card)' }}
+                  onClick={() => setLightboxOpen(true)}
+                >
+                  <img
+                    src={message.file_url}
+                    alt={message.file_name}
+                    className="block max-w-[240px] max-h-[200px] w-full object-cover"
+                    loading="lazy"
+                  />
+                </div>
+                {lightboxOpen && (
+                  <ImageLightbox
+                    src={message.file_url}
+                    alt={message.file_name}
+                    onClose={() => setLightboxOpen(false)}
+                  />
+                )}
+              </>
+            )
           ) : isEditing ? (
             <div
               className={`rounded-2xl ${isOwn ? 'rounded-br-sm' : 'rounded-bl-sm'} p-3 min-w-[180px]`}
@@ -492,27 +609,42 @@ function MessageBubble({
               }}
             >
               {message.type === 'file' && !isDeleted ? (
-                <a
-                  href={message.file_url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="flex flex-col items-center gap-1.5 min-w-[110px]"
-                >
-                  <div className={`w-14 h-14 rounded-xl flex flex-col items-center justify-center gap-0.5 ${isOwn ? 'bg-white/20' : 'bg-cn-gray-100'}`}>
-                    <DocumentIcon className={`w-7 h-7 ${isOwn ? 'text-white' : 'text-cn-blue'}`} />
-                    <span className={`text-[9px] font-bold uppercase tracking-wide ${isOwn ? 'text-white/60' : 'text-cn-gray-500'}`}>
-                      {message.file_name?.split('.').pop()?.slice(0, 4) || 'FILE'}
-                    </span>
-                  </div>
-                  <p className={`text-xs font-medium text-center leading-tight max-w-[150px] truncate ${isOwn ? 'text-white/90' : 'text-cn-gray-800'}`}>
-                    {message.file_name}
-                  </p>
-                  {message.file_size > 0 && (
-                    <p className={`text-[10px] ${isOwn ? 'text-white/60' : 'text-cn-gray-400'}`}>
-                      {formatFileSize(message.file_size)}
+                message.file_expired ? (
+                  <>
+                    <ExpiredFileBubble message={message} isOwn={isOwn} onOpen={() => setResendModalOpen(true)} />
+                    {resendModalOpen && (
+                      <ExpiredModal
+                        message={message}
+                        isOwn={isOwn}
+                        senderName={message.sender?.display_name || message.sender?.full_name}
+                        onClose={() => setResendModalOpen(false)}
+                        onAskResend={() => onAskResend?.(message)}
+                      />
+                    )}
+                  </>
+                ) : (
+                  <a
+                    href={message.file_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex flex-col items-center gap-1.5 min-w-[110px]"
+                  >
+                    <div className={`w-14 h-14 rounded-xl flex flex-col items-center justify-center gap-0.5 ${isOwn ? 'bg-white/20' : 'bg-cn-gray-100'}`}>
+                      <DocumentIcon className={`w-7 h-7 ${isOwn ? 'text-white' : 'text-cn-blue'}`} />
+                      <span className={`text-[9px] font-bold uppercase tracking-wide ${isOwn ? 'text-white/60' : 'text-cn-gray-500'}`}>
+                        {message.file_name?.split('.').pop()?.slice(0, 4) || 'FILE'}
+                      </span>
+                    </div>
+                    <p className={`text-xs font-medium text-center leading-tight max-w-[150px] truncate ${isOwn ? 'text-white/90' : 'text-cn-gray-800'}`}>
+                      {message.file_name}
                     </p>
-                  )}
-                </a>
+                    {message.file_size > 0 && (
+                      <p className={`text-[10px] ${isOwn ? 'text-white/60' : 'text-cn-gray-400'}`}>
+                        {formatFileSize(message.file_size)}
+                      </p>
+                    )}
+                  </a>
+                )
               ) : (
                 <div className="flex items-start gap-1.5">
                   {message.is_encrypted && (
@@ -535,7 +667,6 @@ function MessageBubble({
                 color: showActions ? 'var(--cn-gray-400)' : 'transparent',
                 pointerEvents: showActions ? 'auto' : 'none',
               }}
-              title="Message options"
             >
               <ThreeDotIcon />
             </button>
@@ -579,7 +710,7 @@ function MessageBubble({
           )}
         </span>
 
-        {!isDeleted && message.thread_replies?.length > 0 && (
+        {!isDeleted && (message.reply_count ?? message.thread_replies?.length) > 0 && (
           <button
             onClick={() => onOpenThread?.(message)}
             className="flex items-center gap-1 text-xs px-1 mt-0.5 transition-colors duration-150"
@@ -590,7 +721,7 @@ function MessageBubble({
             <svg width="11" height="11" viewBox="0 0 20 20" fill="currentColor">
               <path fillRule="evenodd" d="M2 5a2 2 0 012-2h12a2 2 0 012 2v7a2 2 0 01-2 2H6l-4 4V5z" clipRule="evenodd" />
             </svg>
-            {message.thread_replies.length} {message.thread_replies.length === 1 ? 'reply' : 'replies'}
+            {(message.reply_count ?? message.thread_replies?.length)} {(message.reply_count ?? message.thread_replies?.length) === 1 ? 'reply' : 'replies'}
           </button>
         )}
 

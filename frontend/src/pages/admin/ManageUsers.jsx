@@ -7,6 +7,7 @@ import { listUsers, createUser, deactivateUser, resetPassword } from '../../api/
 import UserTable from '../../components/admin/UserTable'
 import AddUserModal from '../../components/admin/AddUserModal'
 import { useAuth } from '../../context/AuthContext'
+import Loader from '../../components/Loader'
 
 export default function ManageUsers() {
   const navigate = useNavigate()
@@ -85,10 +86,7 @@ export default function ManageUsers() {
       </div>
 
       {isLoading ? (
-        <div className="flex items-center gap-2 text-cn-gray-400 text-sm">
-          <span className="animate-cn-spin inline-block w-4 h-4 border-2 border-cn-blue border-t-transparent rounded-full" />
-          Loading…
-        </div>
+        <Loader variant="block" />
       ) : (
         <>
           <div className="bg-cn-white rounded-md overflow-hidden shadow-card border border-cn-gray-200">
