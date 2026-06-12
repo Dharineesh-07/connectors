@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/orgchat/backend/config"
 	"github.com/orgchat/backend/database"
 	"github.com/orgchat/backend/models"
 	ws "github.com/orgchat/backend/websocket"
@@ -57,6 +58,7 @@ func (s *MessageService) getMemberRole(convID, userID string) (string, error) {
 }
 
 func (s *MessageService) GetUserConversations(userID string, archived bool) ([]ConversationListItem, error) {
+	// Step 1: fetch memberships (1 query)
 	var memberRows []models.ConversationMember
 	if archived {
 		database.DB.Where("user_id = ? AND archived_at IS NOT NULL", userID).Find(&memberRows)
@@ -64,44 +66,92 @@ func (s *MessageService) GetUserConversations(userID string, archived bool) ([]C
 		database.DB.Where("user_id = ? AND archived_at IS NULL", userID).Find(&memberRows)
 	}
 
-	memberConvIDs := map[string]bool{}
-	var result []ConversationListItem
-
+	memberConvIDs := make(map[string]bool, len(memberRows))
+	archivedAtByConv := make(map[string]*time.Time, len(memberRows))
+	convIDs := make([]string, 0, len(memberRows))
 	for _, m := range memberRows {
 		memberConvIDs[m.ConversationID] = true
-		var conv models.Conversation
-		if err := database.DB.Preload("Members.User").First(&conv, "id = ?", m.ConversationID).Error; err != nil {
-			continue
-		}
+		archivedAtByConv[m.ConversationID] = m.ArchivedAt
+		convIDs = append(convIDs, m.ConversationID)
+	}
 
+	// Step 2: batch load all conversations with members (1 query instead of N)
+	var convs []models.Conversation
+	if len(convIDs) > 0 {
+		database.DB.Preload("Members.User").
+			Where("id IN ?", convIDs).
+			Find(&convs)
+	}
+
+	// Step 3: batch load last messages via DISTINCT ON (2 queries instead of N)
+	lastMsgByConv := map[string]*models.Message{}
+	if len(convIDs) > 0 {
+		type msgIDRow struct{ ID string }
+		var msgIDRows []msgIDRow
+		database.DB.Raw(
+			`SELECT DISTINCT ON (conversation_id) id FROM messages
+			 WHERE conversation_id IN ? AND is_deleted = false
+			 ORDER BY conversation_id, created_at DESC`,
+			convIDs,
+		).Scan(&msgIDRows)
+		if len(msgIDRows) > 0 {
+			ids := make([]string, len(msgIDRows))
+			for i, r := range msgIDRows {
+				ids[i] = r.ID
+			}
+			var lastMsgs []models.Message
+			database.DB.Where("id IN ?", ids).Preload("Sender").Find(&lastMsgs)
+			for i := range lastMsgs {
+				lastMsgByConv[lastMsgs[i].ConversationID] = &lastMsgs[i]
+			}
+		}
+	}
+
+	// Step 4: batch load unread counts (1 query instead of N)
+	unreadByConv := map[string]int64{}
+	if len(convIDs) > 0 {
+		type unreadRow struct {
+			ConversationID string
+			Unread         int64
+		}
+		var rows []unreadRow
+		database.DB.Raw(
+			`SELECT m.conversation_id, COUNT(*) AS unread
+			 FROM messages m
+			 LEFT JOIN message_receipts mr
+			   ON mr.message_id = m.id AND mr.user_id = ? AND mr.status = 'read'
+			 WHERE m.conversation_id IN ?
+			   AND m.sender_id != ?
+			   AND m.is_deleted = false
+			   AND mr.message_id IS NULL
+			 GROUP BY m.conversation_id`,
+			userID, convIDs, userID,
+		).Scan(&rows)
+		for _, r := range rows {
+			unreadByConv[r.ConversationID] = r.Unread
+		}
+	}
+
+	// Build result from batched data
+	result := make([]ConversationListItem, 0, len(convs))
+	for _, conv := range convs {
 		item := ConversationListItem{
 			Conversation: conv,
 			MemberCount:  len(conv.Members),
 			IsMember:     true,
-			ArchivedAt:   m.ArchivedAt,
+			ArchivedAt:   archivedAtByConv[conv.ID],
+			LastMessage:  lastMsgByConv[conv.ID],
+			UnreadCount:  unreadByConv[conv.ID],
 		}
-
-		var lastMsg models.Message
-		if err := database.DB.Where("conversation_id = ? AND is_deleted = ?", conv.ID, false).
-			Order("created_at DESC").
-			Preload("Sender").
-			First(&lastMsg).Error; err == nil {
-			item.LastMessage = &lastMsg
-		}
-
-		database.DB.Model(&models.Message{}).
-			Joins("LEFT JOIN message_receipts ON message_receipts.message_id = messages.id AND message_receipts.user_id = ? AND message_receipts.status = ?", userID, "read").
-			Where("messages.conversation_id = ? AND messages.sender_id != ? AND message_receipts.message_id IS NULL", conv.ID, userID).
-			Count(&item.UnreadCount)
-
 		result = append(result, item)
 	}
 
-	// Non-archived view: also include public groups the user has not yet joined
+	// Non-archived: include public groups the user hasn't joined (capped at 100)
 	if !archived {
 		var publicGroups []models.Conversation
 		database.DB.Preload("Members.User").
 			Where("type = ? AND is_private = ?", "group", false).
+			Limit(100).
 			Find(&publicGroups)
 
 		for _, conv := range publicGroups {
@@ -193,28 +243,23 @@ func (s *MessageService) getOrCreateDM(creatorID string, userIDs []string) (*mod
 		}
 	}
 
-	// find existing DM between exactly these two users
-	var convIDs []string
-	database.DB.Model(&models.ConversationMember{}).
-		Select("conversation_id").
-		Where("user_id = ?", creatorID).
-		Find(&convIDs)
+	// Find existing DM between exactly these two users in a single query:
+	// conversations of type=direct where both users are members and total member count is 2.
+	var existingID string
+	database.DB.Raw(`
+		SELECT c.id FROM conversations c
+		JOIN conversation_members a ON a.conversation_id = c.id AND a.user_id = ?
+		JOIN conversation_members b ON b.conversation_id = c.id AND b.user_id = ?
+		WHERE c.type = 'direct'
+		  AND (SELECT COUNT(*) FROM conversation_members WHERE conversation_id = c.id) = 2
+		LIMIT 1`,
+		creatorID, otherID,
+	).Scan(&existingID)
 
-	for _, cid := range convIDs {
+	if existingID != "" {
 		var conv models.Conversation
-		if err := database.DB.Where("id = ? AND type = ?", cid, "direct").First(&conv).Error; err != nil {
-			continue
-		}
-		var count int64
-		database.DB.Model(&models.ConversationMember{}).
-			Where("conversation_id = ?", cid).Count(&count)
-		if count == 2 {
-			var other models.ConversationMember
-			if database.DB.Where("conversation_id = ? AND user_id = ?", cid, otherID).First(&other).Error == nil {
-				database.DB.Preload("Members.User").First(&conv, "id = ?", cid)
-				return &conv, nil
-			}
-		}
+		database.DB.Preload("Members.User").First(&conv, "id = ?", existingID)
+		return &conv, nil
 	}
 
 	// create new DM
@@ -276,15 +321,14 @@ func (s *MessageService) createGroup(creatorID string, userIDs []string, name, a
 		tx.Rollback()
 		return nil, err
 	}
-	if err := tx.Create(&models.ConversationMember{ConversationID: conv.ID, UserID: creatorID, Role: "admin"}).Error; err != nil {
+	allMembers := make([]models.ConversationMember, 0, len(members)+1)
+	allMembers = append(allMembers, models.ConversationMember{ConversationID: conv.ID, UserID: creatorID, Role: "admin"})
+	for _, uid := range members {
+		allMembers = append(allMembers, models.ConversationMember{ConversationID: conv.ID, UserID: uid, Role: "member"})
+	}
+	if err := tx.Create(&allMembers).Error; err != nil {
 		tx.Rollback()
 		return nil, err
-	}
-	for _, uid := range members {
-		if err := tx.Create(&models.ConversationMember{ConversationID: conv.ID, UserID: uid, Role: "member"}).Error; err != nil {
-			tx.Rollback()
-			return nil, err
-		}
 	}
 	if err := tx.Commit().Error; err != nil {
 		tx.Rollback()
@@ -323,15 +367,11 @@ func (s *MessageService) AddMembers(convID, adminID string, userIDs []string) er
 	if role != "admin" {
 		return errors.New("only admins can add members")
 	}
-	tx := database.DB.Begin()
+	newMembers := make([]models.ConversationMember, 0, len(userIDs))
 	for _, uid := range userIDs {
-		var existing models.ConversationMember
-		if tx.Where("conversation_id = ? AND user_id = ?", convID, uid).First(&existing).Error == nil {
-			continue // already member
-		}
-		tx.Create(&models.ConversationMember{ConversationID: convID, UserID: uid, Role: "member"})
+		newMembers = append(newMembers, models.ConversationMember{ConversationID: convID, UserID: uid, Role: "member"})
 	}
-	return tx.Commit().Error
+	return database.DB.Clauses(clause.OnConflict{DoNothing: true}).Create(&newMembers).Error
 }
 
 func (s *MessageService) JoinConversation(convID, userID string) error {
@@ -386,9 +426,6 @@ func (s *MessageService) GetMessagesAroundDate(convID, userID string, after time
 		Preload("ReplyTo", func(db *gorm.DB) *gorm.DB {
 			return db.Preload("Sender")
 		}).
-		Preload("ThreadReplies", func(db *gorm.DB) *gorm.DB {
-			return db.Order("created_at ASC").Preload("Sender")
-		}).
 		Order("created_at ASC").
 		Limit(51).
 		Find(&messages)
@@ -397,6 +434,7 @@ func (s *MessageService) GetMessagesAroundDate(convID, userID string, after time
 	if hasMore {
 		messages = messages[:50]
 	}
+	populateReplyCounts(messages)
 
 	var nextCursor *string
 	if hasMore && len(messages) > 0 {
@@ -417,9 +455,6 @@ func (s *MessageService) GetMessages(convID, userID string, beforeID *string, li
 		Preload("Receipts").
 		Preload("ReplyTo", func(db *gorm.DB) *gorm.DB {
 			return db.Preload("Sender")
-		}).
-		Preload("ThreadReplies", func(db *gorm.DB) *gorm.DB {
-			return db.Order("created_at ASC").Preload("Sender")
 		}).
 		Order("created_at DESC").
 		Limit(limit + 1)
@@ -452,10 +487,38 @@ func (s *MessageService) GetMessages(convID, userID string, beforeID *string, li
 		messages[i], messages[j] = messages[j], messages[i]
 	}
 
+	populateReplyCounts(messages)
+
 	// mark messages as delivered without blocking the response
 	go s.markDelivered(convID, userID)
 
 	return &MessageListResponse{Messages: messages, NextCursor: nextCursor, HasMore: hasMore}, nil
+}
+
+func populateReplyCounts(messages []models.Message) {
+	if len(messages) == 0 {
+		return
+	}
+	ids := make([]string, len(messages))
+	for i, m := range messages {
+		ids[i] = m.ID
+	}
+	type countRow struct {
+		ThreadParentID string
+		Count          int
+	}
+	var rows []countRow
+	database.DB.Raw(
+		"SELECT thread_parent_id, COUNT(*) AS count FROM messages WHERE thread_parent_id IN ? AND is_deleted = false GROUP BY thread_parent_id",
+		ids,
+	).Scan(&rows)
+	countMap := make(map[string]int, len(rows))
+	for _, r := range rows {
+		countMap[r.ThreadParentID] = r.Count
+	}
+	for i := range messages {
+		messages[i].ReplyCount = countMap[messages[i].ID]
+	}
 }
 
 func (s *MessageService) markDelivered(convID, userID string) {
@@ -487,14 +550,37 @@ func (s *MessageService) markDelivered(convID, userID string) {
 }
 
 func (s *MessageService) MarkAllDelivered(userID string) {
-	var memberRows []models.ConversationMember
-	database.DB.Where("user_id = ?", userID).Find(&memberRows)
-	for _, m := range memberRows {
-		s.markDelivered(m.ConversationID, userID)
+	// Collect all message IDs across every conversation the user is in at once,
+	// then bulk-insert the delivered receipts — 2 queries total instead of 2×N.
+	var msgIDs []string
+	database.DB.Model(&models.Message{}).
+		Select("messages.id").
+		Joins("JOIN conversation_members cm ON cm.conversation_id = messages.conversation_id AND cm.user_id = ?", userID).
+		Where("messages.sender_id != ?", userID).
+		Where("messages.id NOT IN (?)",
+			database.DB.Model(&models.MessageReceipt{}).
+				Select("message_id").
+				Where("user_id = ?", userID),
+		).Find(&msgIDs)
+
+	if len(msgIDs) == 0 {
+		return
 	}
+
+	now := time.Now()
+	receipts := make([]models.MessageReceipt, 0, len(msgIDs))
+	for _, id := range msgIDs {
+		receipts = append(receipts, models.MessageReceipt{
+			MessageID: id,
+			UserID:    userID,
+			Status:    "delivered",
+			Timestamp: now,
+		})
+	}
+	database.DB.Clauses(clause.OnConflict{DoNothing: true}).Create(&receipts)
 }
 
-func (s *MessageService) CreateMessage(convID, senderID, msgType string, content, fileURL, fileName *string, fileSize *int64, replyToID *string, threadParentID *string) (*models.Message, error) {
+func (s *MessageService) CreateMessage(convID, senderID, msgType string, content, fileURL, fileName *string, fileSize *int64, fileThumbnail *string, replyToID *string, threadParentID *string) (*models.Message, error) {
 	if err := s.requireMember(convID, senderID); err != nil {
 		return nil, err
 	}
@@ -507,23 +593,36 @@ func (s *MessageService) CreateMessage(convID, senderID, msgType string, content
 		FileURL:        fileURL,
 		FileName:       fileName,
 		FileSize:       fileSize,
+		FileThumbnail:  fileThumbnail,
 		ReplyToID:      replyToID,
 		ThreadParentID: threadParentID,
+	}
+	if fileURL != nil && *fileURL != "" {
+		expiresAt := time.Now().AddDate(0, 0, config.App.FileExpiryDays)
+		msg.FileExpiresAt = &expiresAt
 	}
 
 	if err := database.DB.Create(msg).Error; err != nil {
 		return nil, err
 	}
 
-	// add delivered receipt for online members
+	// add delivered receipt for online members (single bulk insert)
 	var members []models.ConversationMember
 	database.DB.Where("conversation_id = ? AND user_id != ?", convID, senderID).Find(&members)
 	now := time.Now()
+	onlineReceipts := make([]models.MessageReceipt, 0, len(members))
 	for _, m := range members {
 		if s.WS.IsOnline(m.UserID) {
-			database.DB.Where(models.MessageReceipt{MessageID: msg.ID, UserID: m.UserID}).
-				FirstOrCreate(&models.MessageReceipt{MessageID: msg.ID, UserID: m.UserID, Status: "delivered", Timestamp: now})
+			onlineReceipts = append(onlineReceipts, models.MessageReceipt{
+				MessageID: msg.ID,
+				UserID:    m.UserID,
+				Status:    "delivered",
+				Timestamp: now,
+			})
 		}
+	}
+	if len(onlineReceipts) > 0 {
+		database.DB.Clauses(clause.OnConflict{DoNothing: true}).Create(&onlineReceipts)
 	}
 
 	database.DB.Preload("Sender").Preload("Receipts").Preload("ReplyTo", func(db *gorm.DB) *gorm.DB {
@@ -658,12 +757,27 @@ func (s *MessageService) MarkConversationAsRead(convID, userID string) ([]ReadRe
 				Where("user_id = ? AND status = ?", userID, "read"),
 		).Find(&msgs)
 
+	if len(msgs) == 0 {
+		return nil, nil
+	}
+
 	now := time.Now()
-	var infos []ReadReceiptInfo
+	receipts := make([]models.MessageReceipt, 0, len(msgs))
+	infos := make([]ReadReceiptInfo, 0, len(msgs))
 	for _, m := range msgs {
-		s.MarkAsRead(m.ID, userID)
+		receipts = append(receipts, models.MessageReceipt{
+			MessageID: m.ID,
+			UserID:    userID,
+			Status:    "read",
+			Timestamp: now,
+		})
 		infos = append(infos, ReadReceiptInfo{MessageID: m.ID, SenderID: m.SenderID, Timestamp: now})
 	}
+	// Single bulk upsert: insert new receipts, update status+timestamp on conflict.
+	database.DB.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "message_id"}, {Name: "user_id"}},
+		DoUpdates: clause.AssignmentColumns([]string{"status", "timestamp"}),
+	}).Create(&receipts)
 	return infos, nil
 }
 
@@ -891,13 +1005,40 @@ func (s *MessageService) ProcessScheduledMessages() []models.Message {
 		log.Printf("error: failed to claim scheduled messages: %v", err)
 		return nil
 	}
-
-	var sent []models.Message
-	for _, sm := range due {
-		msg, err := s.CreateMessage(sm.ConversationID, sm.SenderID, sm.Type, sm.Content, sm.FileURL, sm.FileName, sm.FileSize, nil, nil)
-		if err == nil {
-			sent = append(sent, *msg)
-		}
+	if len(due) == 0 {
+		return nil
 	}
+
+	// Bulk-insert all messages in one query, then load them with associations.
+	now := time.Now()
+	msgs := make([]models.Message, 0, len(due))
+	for _, sm := range due {
+		m := models.Message{
+			ConversationID: sm.ConversationID,
+			SenderID:       sm.SenderID,
+			Type:           sm.Type,
+			Content:        sm.Content,
+			FileURL:        sm.FileURL,
+			FileName:       sm.FileName,
+			FileSize:       sm.FileSize,
+		}
+		if sm.FileURL != nil && *sm.FileURL != "" {
+			expiresAt := now.AddDate(0, 0, config.App.FileExpiryDays)
+			m.FileExpiresAt = &expiresAt
+		}
+		msgs = append(msgs, m)
+	}
+	if err := database.DB.Create(&msgs).Error; err != nil {
+		log.Printf("error: failed to insert scheduled messages: %v", err)
+		return nil
+	}
+
+	// Load associations for all sent messages in one query.
+	ids := make([]string, len(msgs))
+	for i, m := range msgs {
+		ids[i] = m.ID
+	}
+	var sent []models.Message
+	database.DB.Where("id IN ?", ids).Preload("Sender").Preload("Receipts").Find(&sent)
 	return sent
 }

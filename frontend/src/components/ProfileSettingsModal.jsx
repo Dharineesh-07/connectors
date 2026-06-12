@@ -77,6 +77,7 @@ export default function ProfileSettingsModal({ onClose }) {
   const [messageFontSize, setMessageFontSize] = useState(
     () => localStorage.getItem('msg_font_size') || 'md'
   )
+  const initialFontSize = useRef(localStorage.getItem('msg_font_size') || 'md')
 
   useEffect(() => {
     return () => stream?.getTracks().forEach(t => t.stop())
@@ -88,30 +89,10 @@ export default function ProfileSettingsModal({ onClose }) {
     }
   }, [cameraOpen, stream])
 
-  const toggleNotifications = () => {
-    const next = !notificationsEnabled
-    localStorage.setItem('notifications_enabled', String(next))
-    setNotificationsEnabled(next)
-    toast.success(next ? 'Notifications enabled' : 'Notifications disabled')
-  }
-
-  const toggleSound = () => {
-    const next = !soundEnabled
-    localStorage.setItem('sound_enabled', String(next))
-    setSoundEnabled(next)
-    toast.success(next ? 'Sound alerts on' : 'Sound alerts off')
-  }
-
-  const handleNotificationType = (value) => {
-    localStorage.setItem('notification_type', value)
-    setNotificationType(value)
-  }
-
-  const handleFontSize = (size) => {
-    localStorage.setItem('msg_font_size', size)
-    document.documentElement.style.setProperty('--msg-font-size', FONT_SIZES[size].value)
-    setMessageFontSize(size)
-  }
+  const toggleNotifications = () => setNotificationsEnabled(prev => !prev)
+  const toggleSound = () => setSoundEnabled(prev => !prev)
+  const handleNotificationType = (value) => setNotificationType(value)
+  const handleFontSize = (size) => setMessageFontSize(size)
 
   const openCamera = async () => {
     if (loading) return
@@ -195,6 +176,29 @@ export default function ProfileSettingsModal({ onClose }) {
         toast.error('Please enter your current password to set a new one')
         setSaving(false)
         return
+      }
+
+      // Save notification preferences
+      const prevNotificationsEnabled = localStorage.getItem('notifications_enabled') !== 'false'
+      const prevSoundEnabled = localStorage.getItem('sound_enabled') !== 'false'
+      const prevNotificationType = localStorage.getItem('notification_type') || 'all'
+      if (
+        notificationsEnabled !== prevNotificationsEnabled ||
+        soundEnabled !== prevSoundEnabled ||
+        notificationType !== prevNotificationType
+      ) {
+        localStorage.setItem('notifications_enabled', String(notificationsEnabled))
+        localStorage.setItem('sound_enabled', String(soundEnabled))
+        localStorage.setItem('notification_type', notificationType)
+        profileUpdated = true
+      }
+
+      // Save font size
+      if (messageFontSize !== initialFontSize.current) {
+        localStorage.setItem('msg_font_size', messageFontSize)
+        document.documentElement.style.setProperty('--msg-font-size', FONT_SIZES[messageFontSize].value)
+        initialFontSize.current = messageFontSize
+        profileUpdated = true
       }
 
       if (profileUpdated) {

@@ -15,6 +15,7 @@ import dayjs from 'dayjs'
 import relativeTime from 'dayjs/plugin/relativeTime'
 import { listTasks, updateTask, deleteTask } from '../api/tasks'
 import TaskCreationModal from '../components/TaskCreationModal'
+import Loader from '../components/Loader'
 import toast from 'react-hot-toast'
 
 dayjs.extend(relativeTime)
@@ -116,7 +117,7 @@ export default function Tasks() {
       {/* Task columns */}
       <div className="flex-1 p-8 overflow-y-auto custom-scrollbar space-y-6">
         {isLoading ? (
-          <div className="flex items-center justify-center py-20 text-cn-gray-400 text-sm font-bold">Loading…</div>
+          <Loader variant="block" />
         ) : (tasks ?? []).length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20 opacity-40">
             <div className="w-20 h-20 rounded-full bg-cn-gray-100 flex items-center justify-center mb-6">

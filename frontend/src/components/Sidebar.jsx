@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams, useLocation } from 'react-router-dom'
+import { useQueryClient } from 'react-query'
+import Loader from './Loader'
+import { getPrefetchConversations, getPrefetchUsers, clearPrefetch } from '../utils/prefetchStore'
 import {
   MagnifyingGlassIcon,
   ArrowRightOnRectangleIcon,
@@ -513,10 +516,7 @@ function ConversationComposer({
 
         <div className="max-h-80 overflow-y-auto border-y border-cn-gray-200">
           {loading ? (
-            <div className="flex items-center justify-center gap-2 px-5 py-10 text-sm text-cn-gray-400">
-              <span className="animate-cn-spin inline-block w-4 h-4 border-2 border-cn-blue border-t-transparent rounded-full" />
-              Loading people...
-            </div>
+            <Loader variant="block" />
           ) : filteredUsers.length ? (
             filteredUsers.map((u) => {
               const selected = selectedIds.includes(u.id)
@@ -589,12 +589,13 @@ export default function Sidebar({ isOpen, onClose }) {
   const { conversationId } = useParams()
   const isOnSecondaryPage = location.pathname === '/call-history' || location.pathname === '/calendar' || location.pathname === '/tasks' || location.pathname === '/scribble' || location.pathname.startsWith('/admin')
   const { openChats, openChat } = useChatPopup()
+  const queryClient = useQueryClient()
   // Stable ref so socket closures always read the latest expanded chat id
   const openChatsRef = useRef(openChats)
   const addFolderInputRef = useRef(null)
   useEffect(() => { openChatsRef.current = openChats }, [openChats])
   const expandedChatId = openChats.find((c) => !c.minimized)?.id
-  const [conversations, setConversations] = useState([])
+  const [conversations, setConversations] = useState(() => getPrefetchConversations() ?? [])
   const [archivedConversations, setArchivedConversations] = useState([])
   const [showArchived, setShowArchived] = useState(false)
   const [showDMs, setShowDMs] = useState(true)
@@ -602,7 +603,7 @@ export default function Sidebar({ isOpen, onClose }) {
   const [search, setSearch] = useState('')
   const [showSearch, setShowSearch] = useState(false)
   const [composerMode, setComposerMode] = useState(null)
-  const [directory, setDirectory] = useState([])
+  const [directory, setDirectory] = useState(() => getPrefetchUsers() ?? [])
   const [directoryLoading, setDirectoryLoading] = useState(false)
   const [creatingConversation, setCreatingConversation] = useState(false)
   const [directorySearch, setDirectorySearch] = useState('')
@@ -632,12 +633,32 @@ export default function Sidebar({ isOpen, onClose }) {
   const themeLabel = theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'
 
   const loadConversations = useCallback(() => {
-    return listConversations().then((data) => setConversations(data ?? [])).catch(() => {})
-  }, [])
+    return listConversations().then((data) => {
+      const convs = data ?? []
+      setConversations(convs)
+      // Seed individual conversation queries so Chat opens instantly without waiting for a separate API call
+      const now = Date.now()
+      convs.forEach((conv) => {
+        queryClient.setQueryData(['conversation', conv.id], conv, { updatedAt: now })
+      })
+    }).catch(() => {})
+  }, [queryClient])
 
   const loadArchivedConversations = useCallback(() => {
     return listConversations({ archived: true }).then((data) => setArchivedConversations(data ?? [])).catch(() => {})
   }, [])
+
+  // Seed React Query cache from prefetch data on first mount, then clear the store
+  useEffect(() => {
+    const prefetchedConvs = getPrefetchConversations()
+    if (prefetchedConvs?.length) {
+      const now = Date.now()
+      prefetchedConvs.forEach((conv) => {
+        queryClient.setQueryData(['conversation', conv.id], conv, { updatedAt: now })
+      })
+    }
+    clearPrefetch()
+  }, [queryClient])
 
   useEffect(() => {
     loadConversations()
@@ -1027,20 +1048,24 @@ export default function Sidebar({ isOpen, onClose }) {
         >
           {[
             { icon: PhoneIcon, label: 'Calls', path: '/call-history' },
-            { icon: CalendarIcon, label: 'Calendar', path: '/calendar' },
+            { icon: CalendarIcon, label: 'Calendar', path: '/calendar', disabled: true },
             { icon: ClipboardDocumentListIcon, label: 'Tasks', path: '/tasks' },
             { icon: PencilSquareIcon, label: 'Scribble', path: '/scribble' },
-          ].map(({ icon: Icon, label, path }) => {
-            const active = location.pathname === path
+          ].map(({ icon: Icon, label, path, disabled }) => {
+            const active = !disabled && location.pathname === path
             return (
               <button
                 key={path}
-                onClick={() => active ? navigate('/') : navigate(path)}
-                title={label}
+                onClick={() => { if (disabled) return; active ? navigate('/') : navigate(path) }}
+                title={disabled ? `${label} (Coming Soon)` : label}
+                disabled={disabled}
                 className="flex flex-col items-center gap-1 w-full py-3 transition-all duration-200 relative"
                 style={{
-                  color: active ? 'var(--cn-blue)' : 'var(--cn-gray-400)',
+                  color: disabled ? 'var(--cn-gray-300)' : active ? 'var(--cn-blue)' : 'var(--cn-gray-400)',
                   background: active ? 'var(--cn-blue-light)' : 'transparent',
+                  opacity: disabled ? 0.45 : 1,
+                  cursor: disabled ? 'not-allowed' : 'pointer',
+                  filter: disabled ? 'grayscale(1)' : 'none',
                 }}
               >
                 {active && (

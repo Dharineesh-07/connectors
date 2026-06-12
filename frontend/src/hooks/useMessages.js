@@ -2,6 +2,10 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { listMessages, markRead, markConversationRead, getMessagesByDate } from '../api/messages'
 import { useSocket } from '../context/SocketContext'
 
+// Module-level cache: conversationId -> { messages, hasMore, cursor }
+// Survives conversation switches so we can show cached data instantly on re-visit.
+const messageCache = new Map()
+
 export function useMessages(conversationId) {
   const { on, connected } = useSocket()
   const [messages, setMessages] = useState([])
@@ -21,12 +25,14 @@ export function useMessages(conversationId) {
       if (!conversationId) return
       setLoading(true)
       try {
-        const data = await listMessages(conversationId, reset ? null : cursorRef.current)
+        const data = await listMessages(conversationId, reset ? null : cursorRef.current, 15)
         if (!mountedRef.current) return
         const incoming = data.messages ?? []
         setHasMore(data.has_more)
         if (data.next_cursor) cursorRef.current = data.next_cursor
-        setMessages((prev) => (reset ? incoming : [...incoming, ...prev]))
+        const next = reset ? incoming : [...incoming, ...(messageCache.get(conversationId)?.messages ?? [])]
+        messageCache.set(conversationId, { messages: next, hasMore: data.has_more, cursor: cursorRef.current })
+        setMessages(next)
         if (reset) {
           markConversationRead(conversationId).catch(() => {})
         }
@@ -39,9 +45,17 @@ export function useMessages(conversationId) {
 
   useEffect(() => {
     cursorRef.current = null
-    setMessages([])
-    setHasMore(false)
     connectedOnceRef.current = false
+    // Show cached messages immediately to avoid blank screen while fetching
+    const cached = messageCache.get(conversationId)
+    if (cached) {
+      setMessages(cached.messages)
+      setHasMore(cached.hasMore)
+      cursorRef.current = cached.cursor ?? null
+    } else {
+      setMessages([])
+      setHasMore(false)
+    }
     load(true)
   }, [conversationId, load])
 
@@ -58,7 +72,12 @@ export function useMessages(conversationId) {
   useEffect(() => {
     return on('message:new', (data) => {
       if (data.conversation_id === conversationId) {
-        setMessages((prev) => [...prev, data])
+        setMessages((prev) => {
+          const next = [...prev, data]
+          const cached = messageCache.get(conversationId)
+          if (cached) messageCache.set(conversationId, { ...cached, messages: next })
+          return next
+        })
         if (data.id && document.hasFocus()) {
           markRead(data.id).catch(() => {})
         }

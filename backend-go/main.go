@@ -19,6 +19,7 @@ import (
 	"github.com/orgchat/backend/middleware"
 	"github.com/orgchat/backend/models"
 	"github.com/orgchat/backend/services"
+	"github.com/orgchat/backend/utils"
 	"github.com/orgchat/backend/sfu"
 	"github.com/orgchat/backend/store"
 	ws "github.com/orgchat/backend/websocket"
@@ -278,6 +279,7 @@ func main() {
 
 	// background task: check reminders every 30s
 	go checkReminders(ctx, notifSvc)
+	go expireFiles(ctx)
 	// background task: send scheduled messages every 30s
 	go processScheduledMessages(ctx, msgSvc, wsManager)
 
@@ -308,13 +310,56 @@ func processScheduledMessages(ctx context.Context, msgSvc *services.MessageServi
 			return
 		case <-ticker.C:
 			sent := msgSvc.ProcessScheduledMessages()
+			if len(sent) == 0 {
+				continue
+			}
+			// Collect unique conversation IDs to fetch all members in one query
+			convIDSet := make(map[string]bool, len(sent))
 			for _, msg := range sent {
-				var members []models.ConversationMember
-				database.DB.Where("conversation_id = ?", msg.ConversationID).Find(&members)
-				for _, m := range members {
+				convIDSet[msg.ConversationID] = true
+			}
+			convIDs := make([]string, 0, len(convIDSet))
+			for id := range convIDSet {
+				convIDs = append(convIDs, id)
+			}
+			var allMembers []models.ConversationMember
+			database.DB.Where("conversation_id IN ?", convIDs).Find(&allMembers)
+			membersByConv := make(map[string][]models.ConversationMember, len(convIDs))
+			for _, m := range allMembers {
+				membersByConv[m.ConversationID] = append(membersByConv[m.ConversationID], m)
+			}
+			for _, msg := range sent {
+				for _, m := range membersByConv[msg.ConversationID] {
 					wsManager.SendToUser(m.UserID, "message:new", msg)
 				}
 				log.Printf("[SCHEDULED] sent message %s in conv %s", msg.ID, msg.ConversationID)
+			}
+		}
+	}
+}
+
+func expireFiles(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			var expired []models.Message
+			database.DB.Where("file_expired = ? AND file_expires_at IS NOT NULL AND file_expires_at <= ? AND file_url IS NOT NULL", false, time.Now()).
+				Find(&expired)
+			for _, msg := range expired {
+				if msg.FileURL != nil {
+					if err := utils.DeleteFile(*msg.FileURL); err != nil {
+						log.Printf("[FILE_EXPIRY] failed to delete file for message %s: %v", msg.ID, err)
+					}
+				}
+				database.DB.Model(&msg).Updates(map[string]any{
+					"file_expired": true,
+					"file_url":     nil,
+				})
+				log.Printf("[FILE_EXPIRY] expired file in message %s", msg.ID)
 			}
 		}
 	}
@@ -331,10 +376,14 @@ func checkReminders(ctx context.Context, notifSvc *services.NotificationService)
 			now := time.Now()
 			var reminders []models.Reminder
 			database.DB.Where("is_completed = ? AND notified = ? AND due_date <= ?", false, false, now).Find(&reminders)
+			var notifiedIDs []string
 			for _, r := range reminders {
 				notifSvc.CreateAndPush(r.UserID, "reminder", "Reminder", r.Title, map[string]string{"reminder_id": r.ID})
-				database.DB.Model(&r).Update("notified", true)
+				notifiedIDs = append(notifiedIDs, r.ID)
 				log.Printf("[REMINDER] sent to user %s: %s", r.UserID, r.Title)
+			}
+			if len(notifiedIDs) > 0 {
+				database.DB.Model(&models.Reminder{}).Where("id IN ?", notifiedIDs).Update("notified", true)
 			}
 			database.DB.Where("expires_at < ?", now).Delete(&models.PasswordResetOTP{})
 		}

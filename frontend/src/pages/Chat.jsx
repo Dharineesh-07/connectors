@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, Fragment } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, Fragment } from 'react'
 import dayjs from 'dayjs'
 import { useParams, useOutletContext } from 'react-router-dom'
 import { useQuery, useQueryClient } from 'react-query'
@@ -80,7 +80,6 @@ export default function Chat() {
   const { messages, hasMore, loading, loadMore, updateMessage, jumpToDate } = useMessages(conversationId)
   const [activeSidebar, setActiveSidebar] = useState(null)
   const [threadMessage, setThreadMessage] = useState(null)
-  const [loadMoreHovered, setLoadMoreHovered] = useState(false)
   const [highlightedMessageId, setHighlightedMessageId] = useState(null)
   const [replyMessage, setReplyMessage] = useState(null)
   const [forwardMessage, setForwardMessage] = useState(null)
@@ -97,6 +96,10 @@ export default function Chat() {
   const bottomRef = useRef(null)
 
   const isInitialLoadRef = useRef(true)
+  const scrollContainerRef = useRef(null)
+  const topSentinelRef = useRef(null)
+  const scrollHeightBeforeRef = useRef(null)
+  const scrollHandledRef = useRef(false)
   const queryClient = useQueryClient()
 
   // Clear all timers when the component unmounts to prevent memory leaks.
@@ -111,7 +114,7 @@ export default function Chat() {
   const { data: conversation } = useQuery(
     ['conversation', conversationId],
     () => getConversation(conversationId),
-    { enabled: !!conversationId }
+    { enabled: !!conversationId, staleTime: 30_000 }
   )
 
   const { ready: e2eeReady, encrypt: e2eeEncrypt, decrypt: e2eeDecrypt, isActive: e2eeActive } = useE2EE(conversation, user?.id)
@@ -184,17 +187,47 @@ export default function Chat() {
     return () => { offPin?.(); offUnpin?.() }
   }, [on, conversationId, queryClient])
 
+  // Scroll to bottom on initial load or new incoming message — skip when prepending older messages
   useEffect(() => {
     if (messages.length === 0) return
+    if (scrollHandledRef.current) { scrollHandledRef.current = false; return }
     const behavior = isInitialLoadRef.current ? 'instant' : 'smooth'
     isInitialLoadRef.current = false
     bottomRef.current?.scrollIntoView({ behavior })
   }, [messages.length])
 
+  // Restore scroll position after prepending older messages so the view doesn't jump
+  useLayoutEffect(() => {
+    if (scrollHeightBeforeRef.current === null || !scrollContainerRef.current) return
+    scrollContainerRef.current.scrollTop =
+      scrollContainerRef.current.scrollHeight - scrollHeightBeforeRef.current
+    scrollHeightBeforeRef.current = null
+    scrollHandledRef.current = true
+  }, [messages])
+
   // Reset initial-load flag when conversation changes so next load is instant
   useEffect(() => {
     isInitialLoadRef.current = true
   }, [conversationId])
+
+  // Trigger loadMore when user scrolls the top sentinel into view
+  const handleLoadMore = useCallback(() => {
+    if (loading || !hasMore || !scrollContainerRef.current) return
+    scrollHeightBeforeRef.current = scrollContainerRef.current.scrollHeight
+    loadMore()
+  }, [loading, hasMore, loadMore])
+
+  useEffect(() => {
+    const sentinel = topSentinelRef.current
+    const container = scrollContainerRef.current
+    if (!sentinel || !container) return
+    const observer = new IntersectionObserver(
+      ([entry]) => { if (entry.isIntersecting) handleLoadMore() },
+      { root: container, threshold: 0 }
+    )
+    observer.observe(sentinel)
+    return () => observer.disconnect()
+  }, [handleLoadMore])
 
   // Derive the live thread message from the messages array so replies stay in sync
   const currentThreadMessage = threadMessage
@@ -413,7 +446,16 @@ export default function Chat() {
   const handleForwardTo = useCallback(async (targetConvId) => {
     if (!forwardMessage) return
     try {
-      await sendMessage(targetConvId, { content: forwardMessage.content, type: 'text' })
+      const isText = !forwardMessage.type || forwardMessage.type === 'text'
+      const payload = isText
+        ? { type: 'text', content: forwardMessage.content }
+        : {
+            type: forwardMessage.type,
+            file_url: forwardMessage.file_url,
+            file_name: forwardMessage.file_name,
+            file_size: forwardMessage.file_size,
+          }
+      await sendMessage(targetConvId, payload)
       toast.success('Message forwarded')
     } catch {
       toast.error('Forward failed')
@@ -580,26 +622,20 @@ export default function Chat() {
           </div>
         )}
 
-        <div className="flex-1 overflow-y-auto px-5 py-4 cn-chat-bg">
-          {hasMore && (
-            <div className="text-center mb-4">
-              <button
-                onClick={loadMore}
-                disabled={loading}
-                className="text-xs font-semibold px-5 py-2 rounded-full transition-all duration-200 disabled:opacity-50"
-                style={{
-                  background: loadMoreHovered
-                    ? 'linear-gradient(135deg, #3399CC 0%, #2277AA 100%)'
-                    : 'linear-gradient(135deg, rgba(51,153,204,0.15) 0%, rgba(51,153,204,0.08) 100%)',
-                  color: loadMoreHovered ? '#fff' : 'var(--cn-blue)',
-                  border: '1.5px solid rgba(51,153,204,0.25)',
-                  boxShadow: loadMoreHovered ? '0 4px 12px rgba(51,153,204,0.35)' : 'none',
-                }}
-                onMouseEnter={() => setLoadMoreHovered(true)}
-                onMouseLeave={() => setLoadMoreHovered(false)}
-              >
-                {loading ? '↑ Loading…' : '↑ Load earlier messages'}
-              </button>
+        <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-5 py-4 cn-chat-bg">
+          {/* Sentinel: triggers loadMore when scrolled into view */}
+          <div ref={topSentinelRef} />
+          {loading && (
+            <div className="flex justify-center py-3">
+              <div className="flex gap-1.5">
+                {[
+                  { bg: 'linear-gradient(135deg,#CC3333,#A52266)', delay: '0s' },
+                  { bg: 'linear-gradient(135deg,#A52266,#3399CC)', delay: '0.2s' },
+                  { bg: 'linear-gradient(135deg,#3399CC,#2277AA)', delay: '0.4s' },
+                ].map((d, i) => (
+                  <div key={i} style={{ width: '7px', height: '7px', borderRadius: '50%', background: d.bg, animation: 'cn-loader-dot 1.4s ease infinite', animationDelay: d.delay }} />
+                ))}
+              </div>
             </div>
           )}
           {messages.map((msg, index) => {
@@ -709,6 +745,7 @@ export default function Chat() {
         />
       )}
       <TaskCreationModal
+        key={taskSourceMessage?.id}
         isOpen={!!taskSourceMessage}
         onClose={() => setTaskSourceMessage(null)}
         prefillTitle={taskSourceMessage?.content?.slice(0, 120) ?? ''}
@@ -744,9 +781,16 @@ export default function Chat() {
               </button>
             </div>
             <div className="overflow-y-auto flex-1">
-              {forwardConversations
-                .filter((c) => c.id !== conversationId)
-                .map((c) => {
+              {(() => {
+                const opts = forwardConversations.filter((c) => c.id !== conversationId)
+                if (!opts.length) {
+                  return (
+                    <p className="text-center text-sm text-cn-gray-400 py-8 px-4">
+                      No other conversations to forward to
+                    </p>
+                  )
+                }
+                return opts.map((c) => {
                   const name =
                     c.type === 'direct'
                       ? c.members?.find((m) => m.user_id !== user?.id)?.user
@@ -764,7 +808,8 @@ export default function Chat() {
                       {name}
                     </button>
                   )
-                })}
+                })
+              })()}
             </div>
           </div>
         </div>

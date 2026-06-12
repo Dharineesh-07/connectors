@@ -17,7 +17,7 @@ function HiddenChatItem({ conversationId, onOpen }) {
   const { data: conv } = useQuery(
     ['conversation', conversationId],
     () => getConversation(conversationId),
-    { enabled: !!conversationId }
+    { enabled: !!conversationId, staleTime: 30_000 }
   )
   const isDirect = conv?.type === 'direct'
   const other = isDirect ? conv?.members?.find((m) => m.user_id !== user?.id) : null

@@ -1,6 +1,7 @@
 import { Component } from 'react'
 import { createBrowserRouter, RouterProvider, Navigate, Outlet } from 'react-router-dom'
 import { useAuth } from './context/AuthContext'
+import Loader from './components/Loader'
 import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
 import Chat from './pages/Chat'
@@ -48,7 +49,7 @@ class ErrorBoundary extends Component {
 
 function RequireAuth() {
   const { user, loading } = useAuth()
-  if (loading) return null
+  if (loading) return <Loader variant="fullscreen" />
   if (!user) return <Navigate to="/login" replace />
   return <Outlet />
 }

@@ -76,6 +76,7 @@ func (h *MessagesHandler) SendMessage(c *gin.Context) {
 		FileURL        *string `json:"file_url"`
 		FileName       *string `json:"file_name"`
 		FileSize       *int64  `json:"file_size"`
+		FileThumbnail  *string `json:"file_thumbnail"`
 		IsEncrypted    bool    `json:"is_encrypted"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -86,7 +87,7 @@ func (h *MessagesHandler) SendMessage(c *gin.Context) {
 		req.Type = "text"
 	}
 
-	msg, err := h.Service.CreateMessage(convID, user.ID, req.Type, req.Content, req.FileURL, req.FileName, req.FileSize, req.ReplyToID, req.ThreadParentID)
+	msg, err := h.Service.CreateMessage(convID, user.ID, req.Type, req.Content, req.FileURL, req.FileName, req.FileSize, req.FileThumbnail, req.ReplyToID, req.ThreadParentID)
 	if err == nil && req.IsEncrypted {
 		database.DB.Model(&msg).Update("is_encrypted", true)
 		msg.IsEncrypted = true

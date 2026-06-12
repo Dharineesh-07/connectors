@@ -1,9 +1,9 @@
 import api from './axios'
 
-export const listMessages = (conversationId, beforeId) =>
+export const listMessages = (conversationId, beforeId, limit = 15) =>
   api
     .get(`/conversations/${conversationId}/messages`, {
-      params: beforeId ? { before_id: beforeId } : {},
+      params: { limit, ...(beforeId ? { before_id: beforeId } : {}) },
     })
     .then((r) => r.data)
 

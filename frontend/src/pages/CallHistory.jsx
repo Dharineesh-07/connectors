@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useQuery } from 'react-query'
 import { useNavigate } from 'react-router-dom'
+import Loader from '../components/Loader'
 import {
   PhoneIcon,
   VideoCameraIcon,
@@ -363,10 +364,7 @@ export default function CallHistoryPage() {
           </div>
 
           {isLoading ? (
-            <div className="flex items-center gap-3 text-cn-gray-400 text-sm py-16 justify-center">
-              <span className="animate-cn-spin inline-block w-5 h-5 border-2 border-cn-blue border-t-transparent rounded-full" />
-              Loading your calls…
-            </div>
+            <Loader variant="block" />
           ) : calls.length === 0 ? (
             <div className="flex flex-col items-center py-16 text-center px-4">
               <div

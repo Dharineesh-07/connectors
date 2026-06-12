@@ -27,6 +27,7 @@ import {
   disconnectGoogleCalendar,
 } from '../api/googleCalendar'
 import ReminderModal from '../components/ReminderModal'
+import Loader from '../components/Loader'
 import GroupCallRoom from '../components/GroupCallRoom'
 import { useAuth } from '../context/AuthContext'
 import toast from 'react-hot-toast'
@@ -492,6 +493,7 @@ export default function Calendar() {
           </div>
 
           <div className="flex-1 overflow-y-auto p-6 space-y-4 custom-scrollbar">
+            {isLoading ? <Loader variant="block" /> : <>
             {/* Google Calendar events section */}
             {selectedDateGoogleEvents.length > 0 && (
               <div>
@@ -659,6 +661,7 @@ export default function Calendar() {
                 <p className="text-xs text-cn-gray-400 mt-2 px-10">Enjoy your free day or add a new task above!</p>
               </div>
             )}
+            </>}
           </div>
         </div>
       </div>

@@ -4,6 +4,7 @@ import { useQuery } from 'react-query'
 import { XMarkIcon } from '@heroicons/react/24/outline'
 import { getAuditLogs } from '../../api/admin'
 import AuditLogItem from '../../components/admin/AuditLogItem'
+import Loader from '../../components/Loader'
 
 const PAGE_SIZE = 20
 const ACTION_FILTERS = [
@@ -67,10 +68,7 @@ export default function AuditLogs() {
 
       <div className="bg-cn-white rounded-md overflow-hidden shadow-card border border-cn-gray-200">
         {isLoading ? (
-          <div className="flex items-center gap-2 text-cn-gray-400 text-sm p-6">
-            <span className="animate-cn-spin inline-block w-4 h-4 border-2 border-cn-blue border-t-transparent rounded-full" />
-            Loading...
-          </div>
+          <Loader variant="block" />
         ) : data?.logs?.length ? (
           <div className="overflow-x-auto">
             <table className="w-full min-w-[920px] text-sm">
