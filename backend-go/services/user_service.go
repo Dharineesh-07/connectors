@@ -69,8 +69,18 @@ func (s *UserService) CreateUser(adminID string, email, fullName string, departm
 	if len(parts) != 2 {
 		return nil, errors.New("invalid email")
 	}
-	if authDomain != "" && parts[1] != authDomain {
-		return nil, fmt.Errorf("only %s email addresses are allowed", authDomain)
+	if authDomain != "" {
+		allowed := strings.Split(authDomain, ",")
+		domainOK := false
+		for _, d := range allowed {
+			if parts[1] == strings.TrimSpace(d) {
+				domainOK = true
+				break
+			}
+		}
+		if !domainOK {
+			return nil, fmt.Errorf("only %s email addresses are allowed", authDomain)
+		}
 	}
 
 	var existing models.User
