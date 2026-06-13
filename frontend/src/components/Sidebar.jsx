@@ -745,7 +745,7 @@ export default function Sidebar({ isOpen, onClose }) {
       setConversations((prev) => {
         const idx = prev.findIndex((c) => c.id === data.conversation_id)
         if (idx === -1) return prev
-        const activeId = openChatsRef.current.find((c) => !c.minimized)?.id
+        const activeId = openChatsRef.current.find((c) => !c.minimized)?.id ?? conversationId
         const updated = {
           ...prev[idx],
           last_message: data,

@@ -254,7 +254,7 @@ export default function CallHistoryPage() {
   const [page, setPage] = useState(1)
   const limit = 15
 
-  const { data, isLoading, refetch } = useQuery(
+  const { data, isLoading, isFetching, refetch } = useQuery(
     ['my-call-history', page],
     () => getCallHistory({ page, limit }),
     { keepPreviousData: true }
@@ -382,16 +382,25 @@ export default function CallHistoryPage() {
               </p>
             </div>
           ) : (
-            <div className="divide-y divide-cn-gray-200">
-              {calls.map((call, i) => (
-                <CallRow
-                  key={call.id}
-                  call={call}
-                  currentUserId={user?.id}
-                  index={i}
-                  onOpenChat={(convId) => navigate(`/chat/${convId}`)}
-                />
-              ))}
+            <div className="relative">
+              {isFetching && (
+                <div className="absolute inset-0 z-10 flex items-center justify-center rounded-b-xl"
+                  style={{ background: 'rgba(var(--cn-white-rgb, 255,255,255), 0.75)', backdropFilter: 'blur(2px)' }}
+                >
+                  <Loader variant="block" />
+                </div>
+              )}
+              <div className={`divide-y divide-cn-gray-200 transition-opacity duration-200 ${isFetching ? 'opacity-40' : 'opacity-100'}`}>
+                {calls.map((call, i) => (
+                  <CallRow
+                    key={call.id}
+                    call={call}
+                    currentUserId={user?.id}
+                    index={i}
+                    onOpenChat={(convId) => navigate(`/chat/${convId}`)}
+                  />
+                ))}
+              </div>
             </div>
           )}
 
@@ -407,7 +416,7 @@ export default function CallHistoryPage() {
               <div className="flex items-center gap-1">
                 <button
                   type="button"
-                  disabled={page <= 1}
+                  disabled={page <= 1 || isFetching}
                   onClick={() => setPage((p) => Math.max(1, p - 1))}
                   className="p-1.5 rounded-lg text-cn-gray-400 hover:text-cn-charcoal hover:bg-cn-gray-200 disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-200"
                 >
@@ -415,7 +424,7 @@ export default function CallHistoryPage() {
                 </button>
                 <button
                   type="button"
-                  disabled={page >= totalPages}
+                  disabled={page >= totalPages || isFetching}
                   onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                   className="p-1.5 rounded-lg text-cn-gray-400 hover:text-cn-charcoal hover:bg-cn-gray-200 disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-200"
                 >

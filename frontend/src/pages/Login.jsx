@@ -69,6 +69,9 @@ export default function Login() {
   }, [user])
 
   const [view, setView] = useState('login') // 'login' | 'forgot' | 'reset'
+
+  const sanitizeEmail = (val) => val.replace(/[A-Z]/g, (c) => c.toLowerCase())
+
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [otp, setOtp] = useState('')
@@ -92,12 +95,9 @@ export default function Login() {
       await login(email, password)
       setLoading(false)
       setTransitioning(true)
-      const [[conversations, users]] = await Promise.all([
-        Promise.all([
-          listConversations().catch(() => null),
-          listUsers({ limit: 100 }).catch(() => null),
-        ]),
-        new Promise((r) => setTimeout(r, 3000)),
+      const [conversations, users] = await Promise.all([
+        listConversations().catch(() => null),
+        listUsers({ limit: 100 }).catch(() => null),
       ])
       setPrefetch({ conversations, users })
       navigate('/', { replace: true })
@@ -174,16 +174,16 @@ export default function Login() {
                 type="email"
                 required
                 value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                onChange={(e) => setEmail(sanitizeEmail(e.target.value))}
                 placeholder="you@company.com"
                 style={{ ...INPUT_STYLE, ...(focused === 'email' ? focusStyle : {}) }}
                 onFocus={() => setFocused('email')}
                 onBlur={() => setFocused('')}
               />
             </div>
-            <button 
-              type="submit" 
-              disabled={loading} 
+            <button
+              type="submit"
+              disabled={loading}
               style={BUTTON_STYLE(loading, false)}
             >
               {loading ? 'Sending...' : 'Send OTP →'}
@@ -275,7 +275,7 @@ export default function Login() {
               required
               autoFocus
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(e) => setEmail(sanitizeEmail(e.target.value))}
               placeholder="you@company.com"
               style={{ ...INPUT_STYLE, ...(focused === 'email' ? focusStyle : {}) }}
               onFocus={() => setFocused('email')}

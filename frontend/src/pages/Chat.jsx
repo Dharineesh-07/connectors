@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, Fragment } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, Fragment } from 'react'
 import dayjs from 'dayjs'
 import { useParams, useOutletContext } from 'react-router-dom'
 import { useQuery, useQueryClient } from 'react-query'
@@ -78,7 +78,9 @@ export default function Chat() {
   const { initiateCall: startRTC } = useCall()
   const { onToggleSidebar } = useOutletContext()
   const { messages, hasMore, loading, loadMore, updateMessage, jumpToDate } = useMessages(conversationId)
+  const [optimisticMsgs, setOptimisticMsgs] = useState([])
   const [activeSidebar, setActiveSidebar] = useState(null)
+  const [isFullscreen, setIsFullscreen] = useState(false)
   const [threadMessage, setThreadMessage] = useState(null)
   const [highlightedMessageId, setHighlightedMessageId] = useState(null)
   const [replyMessage, setReplyMessage] = useState(null)
@@ -122,15 +124,11 @@ export default function Chat() {
   const { data: pinnedMsgs = [] } = useQuery(
     ['pinned-messages', conversationId],
     () => getPinnedMessages(conversationId),
-    {
-      enabled: !!conversationId,
-      onSuccess: (pins) => setPinnedMessageIds(new Set(pins.map((p) => p.message_id))),
-    }
+    { enabled: !!conversationId }
   )
 
-  // keep pinnedMessageIds in sync when pins load. pinnedMsgs defaults to a new
-  // [] on every render (react-query data is undefined until loaded), so guard
-  // against setting an equal Set to avoid an infinite render loop.
+  // pinnedMsgs defaults to a new [] on every render while loading, so guard
+  // against setting an equal Set to avoid an unnecessary re-render.
   useEffect(() => {
     setPinnedMessageIds((prev) => {
       const next = new Set(pinnedMsgs.map((p) => p.message_id))
@@ -229,13 +227,35 @@ export default function Chat() {
     return () => observer.disconnect()
   }, [handleLoadMore])
 
+  // Stable members reference — prevents all MessageBubbles re-rendering on every 30s query refetch.
+  // Only recomputes when the actual set of member IDs changes, not on every object reference change.
+  const membersKey = conversation?.members?.map((m) => m.user_id).join(',') ?? ''
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const conversationMembers = useMemo(() => conversation?.members ?? [], [membersKey])
+
+  // Merge confirmed messages with any in-flight optimistic ones.
+  // Deduplicates: once message:new arrives (same sender + content within 10 s), the optimistic drops.
+  const displayMessages = useMemo(() => {
+    if (optimisticMsgs.length === 0) return messages
+    const tenSecAgo = Date.now() - 10_000
+    const confirmed = new Set(
+      messages
+        .filter((m) => m.sender_id === user?.id && new Date(m.created_at).getTime() > tenSecAgo)
+        .map((m) => m.content)
+    )
+    const pending = optimisticMsgs.filter((o) => !confirmed.has(o.content))
+    return pending.length === 0 ? messages : [...messages, ...pending]
+  }, [messages, optimisticMsgs, user?.id])
+
   // Derive the live thread message from the messages array so replies stay in sync
-  const currentThreadMessage = threadMessage
-    ? messages.find((m) => m.id === threadMessage.id) ?? threadMessage
-    : null
+  const currentThreadMessage = useMemo(
+    () => threadMessage ? messages.find((m) => m.id === threadMessage.id) ?? threadMessage : null,
+    [threadMessage, messages]
+  )
 
   // Clear reply/forward/thread and discard pending queue when switching conversations
   useEffect(() => {
+    setOptimisticMsgs([])
     setReplyMessage(null)
     setForwardMessage(null)
     setForwardConversations([])
@@ -295,6 +315,24 @@ export default function Chat() {
       saveDraftQueue(conversationId, pendingQueueRef.current)
       return
     }
+
+    // Show the message immediately for text-type sends; file/voice/image have their
+    // own upload-progress feedback so they don't need an optimistic bubble.
+    const isText = !msgData.type || msgData.type === 'text'
+    const tempId = isText ? `opt_${Date.now()}_${Math.random().toString(36).slice(2)}` : null
+    if (tempId) {
+      setOptimisticMsgs((prev) => [...prev, {
+        id: tempId,
+        conversation_id: conversationId,
+        sender_id: user?.id,
+        sender: { id: user?.id, full_name: user?.full_name, display_name: user?.display_name, avatar_url: user?.avatar_url },
+        content: msgData.content ?? '',
+        type: 'text',
+        created_at: new Date().toISOString(),
+        is_pending: true,
+      }])
+    }
+
     try {
       let payload = msgData
       if (e2eeActive && e2eeReady && msgData.type === 'text' && msgData.content) {
@@ -304,8 +342,10 @@ export default function Chat() {
       await sendMessage(conversationId, payload)
     } catch {
       toast.error('Failed to send message')
+    } finally {
+      if (tempId) setOptimisticMsgs((prev) => prev.filter((m) => m.id !== tempId))
     }
-  }, [isOnline, connected, conversationId, e2eeActive, e2eeReady, e2eeEncrypt])
+  }, [isOnline, connected, conversationId, e2eeActive, e2eeReady, e2eeEncrypt, user])
 
   const handleFileUpload = useCallback(async (file) => {
     if (!isOnline || !connected) {
@@ -609,6 +649,11 @@ export default function Chat() {
           onToggleSidebar={onToggleSidebar}
           onToggleE2EE={handleToggleE2EE}
           onJumpToDate={handleJumpToDate}
+          isFullscreen={isFullscreen}
+          onToggleFullscreen={() => setIsFullscreen((v) => {
+            if (!v) { setActiveSidebar(null); setThreadMessage(null) }
+            return !v
+          })}
         />
 
         <OfflineBanner />
@@ -638,9 +683,9 @@ export default function Chat() {
               </div>
             </div>
           )}
-          {messages.map((msg, index) => {
+          {displayMessages.map((msg, index) => {
             const msgDay = dayjs(msg.created_at).format('YYYY-MM-DD')
-            const prevDay = index > 0 ? dayjs(messages[index - 1].created_at).format('YYYY-MM-DD') : null
+            const prevDay = index > 0 ? dayjs(displayMessages[index - 1].created_at).format('YYYY-MM-DD') : null
             return (
               <Fragment key={msg.id}>
                 {msgDay !== prevDay && <DateSeparator label={getDateLabel(msg.created_at)} />}
@@ -649,6 +694,7 @@ export default function Chat() {
                   isOwn={msg.sender_id === user?.id}
                   currentUserId={user?.id}
                   highlighted={highlightedMessageId === msg.id}
+                  isPending={!!msg.is_pending}
                   onReply={handleReply}
                   onForward={handleForward}
                   onEdit={handleEdit}
@@ -658,7 +704,7 @@ export default function Chat() {
                   onPin={handlePin}
                   isPinned={pinnedMessageIds.has(msg.id)}
                   onCreateTask={(msg) => setTaskSourceMessage(msg)}
-                  conversationMembers={conversation?.members}
+                  conversationMembers={conversationMembers}
                   decrypt={e2eeDecrypt}
                   onPollUpdate={(updatedPoll) => updateMessage(msg.id, (m) => ({ ...m, poll: updatedPoll }))}
                 />
@@ -689,6 +735,7 @@ export default function Chat() {
           onCancelReply={() => setReplyMessage(null)}
           e2eeActive={e2eeActive}
           e2eeReady={e2eeReady}
+          isFullscreen={isFullscreen}
         />
       </div>
 

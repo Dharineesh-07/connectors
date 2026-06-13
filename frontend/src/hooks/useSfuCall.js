@@ -29,6 +29,7 @@ export function useSfuCall({ room, isVideo, localUser, onConnected, onError, onE
   const [micEnabled, setMicEnabled] = useState(true)
   const [cameraEnabled, setCameraEnabled] = useState(isVideo)
   const [screenSharing, setScreenSharing] = useState(false)
+  const [videoCapped, setVideoCapped] = useState(false) // true when server dropped our video (room limit)
 
   const pcRef = useRef(null)
   const localStreamRef = useRef(null)        // raw getUserMedia stream
@@ -235,12 +236,21 @@ export function useSfuCall({ room, isVideo, localUser, onConnected, onError, onE
       if (disposed) return
       iceServersRef.current = iceServers
 
-      // 2) Local media (fall back to audio-only if the camera is unavailable)
+      // 2) Local media (fall back to audio-only if the camera is unavailable).
+      // Explicit audio constraints request minimal latency and mono channel — halves
+      // audio bandwidth and reduces the jitter buffer target on most browsers.
+      const audioConstraints = {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        channelCount: 1,
+        latency: 0,
+      }
       let stream
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: isVideo })
+        stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints, video: isVideo })
       } catch {
-        try { stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false }) }
+        try { stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints, video: false }) }
         catch (e) {
           if (!disposed) { cbRef.current.onError?.(e?.message || 'Could not access microphone/camera'); setStatus('failed') }
           return
@@ -331,6 +341,17 @@ export function useSfuCall({ room, isVideo, localUser, onConnected, onError, onE
       }
     })
 
+    const offVideoCapped = on('webrtc:video-capped', (data) => {
+      if (data?.room !== room) return
+      setVideoCapped(true)
+      // Mute the local camera track so the UI reflects reality (video isn't being forwarded).
+      const track = localStreamRef.current?.getVideoTracks()[0]
+      if (track) track.enabled = false
+      localStateRef.current.camMuted = true
+      setCameraEnabled(false)
+      commit()
+    })
+
     setup()
 
     return () => {
@@ -338,7 +359,7 @@ export function useSfuCall({ room, isVideo, localUser, onConnected, onError, onE
       armedRef.current = false
       recoverAttemptsRef.current = 0
       establishPeerRef.current = null
-      offOffer(); offIce(); offRoster(); offSignal(); offReconnect()
+      offOffer(); offIce(); offRoster(); offSignal(); offReconnect(); offVideoCapped()
       emitRef.current('webrtc:leave', { room })
       stopSpeakingDetection()
       try { pcRef.current?.close() } catch { /* */ }
@@ -364,7 +385,7 @@ export function useSfuCall({ room, isVideo, localUser, onConnected, onError, onE
   const startSpeakingDetection = () => {
     const AudioCtx = window.AudioContext || window.webkitAudioContext
     if (!AudioCtx) return
-    audioCtxRef.current = new AudioCtx()
+    audioCtxRef.current = new AudioCtx({ latencyHint: 'interactive' })
     audioCtxRef.current.resume?.().catch(() => {})
 
     const ensureAnalyser = (id, stream) => {
@@ -539,6 +560,7 @@ export function useSfuCall({ room, isVideo, localUser, onConnected, onError, onE
     micEnabled,
     cameraEnabled,
     screenSharing,
+    videoCapped,
     toggleMic,
     toggleCamera,
     toggleScreenShare,

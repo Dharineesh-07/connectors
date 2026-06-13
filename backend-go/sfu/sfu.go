@@ -21,6 +21,7 @@ import (
 	"errors"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -123,7 +124,11 @@ func New() (*SFU, error) {
 
 	settingEngine := webrtc.SettingEngine{}
 	if ip := config.App.WebRTCNAT1To1IP; ip != "" {
-		settingEngine.SetNAT1To1IPs([]string{ip}, webrtc.ICECandidateTypeHost)
+		ips := strings.Split(ip, ",")
+		for i := range ips {
+			ips[i] = strings.TrimSpace(ips[i])
+		}
+		settingEngine.SetNAT1To1IPs(ips, webrtc.ICECandidateTypeHost)
 	}
 	if port := config.App.WebRTCUDPPort; port > 0 {
 		udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: port})
@@ -292,6 +297,11 @@ func (s *SFU) Join(room, userID string, send SendFunc) (*Peer, error) {
 		log.Printf("sfu: OnTrack user=%s kind=%s id=%s", userID, track.Kind(), track.ID())
 		local := r.addTrack(track, userID)
 		if local == nil {
+			// Video was rejected because the room's video-track cap was reached.
+			// Notify the client so the UI can display a "video disabled" message.
+			if track.Kind() == webrtc.RTPCodecTypeVideo {
+				p.send("webrtc:video-capped", map[string]interface{}{"room": r.name})
+			}
 			return
 		}
 		defer r.removeTrack(local)
@@ -412,12 +422,29 @@ func (p *Peer) UserID() string { return p.userID }
 // addTrack registers a forwarder for an incoming publisher track. The forwarder
 // carries the publisher's userID as StreamID so the browser groups the
 // participant's media and the SFU can avoid echoing it back to the publisher.
+// Returns nil when the room's video-track cap is reached (audio is never capped).
 func (r *Room) addTrack(t *webrtc.TrackRemote, userID string) *webrtc.TrackLocalStaticRTP {
 	r.mu.Lock()
 	defer func() {
 		r.mu.Unlock()
 		r.signalPeerConnections()
 	}()
+
+	// Enforce the per-room video cap to bound SFU memory under large calls.
+	// Each forwarded video track costs ~10-30 MB; capping at 8 keeps a 40-user
+	// call well within a 5 GB budget while audio (cheap) always gets through.
+	if max := config.App.MaxVideoTracksPerRoom; max > 0 && t.Kind() == webrtc.RTPCodecTypeVideo {
+		videoCount := 0
+		for _, existing := range r.trackLocals {
+			if strings.HasPrefix(strings.ToLower(existing.Codec().MimeType), "video/") {
+				videoCount++
+			}
+		}
+		if videoCount >= max {
+			log.Printf("sfu: video cap (%d) reached in room %s — dropping video from user %s", max, r.name, userID)
+			return nil
+		}
+	}
 
 	id := userID + "-" + t.ID()
 	local, err := webrtc.NewTrackLocalStaticRTP(t.Codec().RTPCodecCapability, id, userID)
@@ -481,9 +508,14 @@ func (r *Room) signalPeerConnections() {
 				if local.StreamID() == p.userID {
 					continue
 				}
-				if _, err := p.pc.AddTrack(local); err != nil {
+				sender, err := p.pc.AddTrack(local)
+				if err != nil {
 					return true
 				}
+				// Forward keyframe requests (PLI/FIR) from this subscriber back to
+				// the publisher so mid-stream joiners and frame-loss events recover
+				// quickly without waiting for the 3-second keyframe ticker.
+				go r.forwardSubscriberRTCP(sender, local.StreamID())
 				p.renegotiate = true
 			}
 
@@ -548,6 +580,40 @@ func (r *Room) dispatchKeyFrame() {
 			_ = p.pc.WriteRTCP([]rtcp.Packet{
 				&rtcp.PictureLossIndication{MediaSSRC: uint32(receiver.Track().SSRC())},
 			})
+		}
+	}
+}
+
+// forwardSubscriberRTCP reads RTCP from a subscriber's RTPSender and forwards
+// PLI/FIR packets to the publisher so the publisher sends a fresh keyframe.
+// The goroutine exits automatically when the sender is closed.
+func (r *Room) forwardSubscriberRTCP(sender *webrtc.RTPSender, publisherUserID string) {
+	for {
+		pkts, _, err := sender.ReadRTCP()
+		if err != nil {
+			return
+		}
+		r.mu.RLock()
+		var pub *webrtc.PeerConnection
+		for p := range r.peers {
+			if p.userID == publisherUserID {
+				pub = p.pc
+				break
+			}
+		}
+		r.mu.RUnlock()
+		if pub == nil {
+			return
+		}
+		var fwd []rtcp.Packet
+		for _, pkt := range pkts {
+			switch pkt.(type) {
+			case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
+				fwd = append(fwd, pkt)
+			}
+		}
+		if len(fwd) > 0 {
+			_ = pub.WriteRTCP(fwd)
 		}
 	}
 }

@@ -67,6 +67,17 @@ func (s *CallService) InitiateCall(convID, initiatorID, callType string) (*CallR
 			stale = true
 		} else if time.Since(existingCall.StartedAt) > 4*time.Hour {
 			stale = true
+		} else {
+			// No joined participants means the call is a zombie (e.g. server restart
+			// or both sides disconnected without LeaveCall being called). Expire it
+			// immediately so users aren't blocked from starting a new call.
+			var joinedCount int64
+			database.DB.Model(&models.CallParticipant{}).
+				Where("call_id = ? AND status = ?", existingCall.ID, "joined").
+				Count(&joinedCount)
+			if joinedCount == 0 {
+				stale = true
+			}
 		}
 
 		if stale {
