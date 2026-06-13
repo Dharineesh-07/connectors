@@ -211,6 +211,7 @@ function MessageBubble({
   isOwn,
   currentUserId,
   highlighted,
+  isPending,
   onReply,
   onForward,
   onEdit,
@@ -325,7 +326,7 @@ function MessageBubble({
   const canEdit = isOwn && !isDeleted && minutesSinceSent <= 10
   const canDelete = isOwn && !isDeleted && minutesSinceSent <= 30
 
-  const showActions = (hovered || menuOpen) && !isDeleted
+  const showActions = (hovered || menuOpen) && !isDeleted && !isPending
 
   const dropdownMenu =
     menuOpen &&
@@ -698,15 +699,21 @@ function MessageBubble({
         )}
 
         <span className="text-xs flex items-center gap-0.5 text-cn-gray-400 px-1">
-          {message.is_encrypted && (
+          {message.is_encrypted && !isPending && (
             <LockClosedIcon className="w-2.5 h-2.5 text-cn-blue" title="End-to-end encrypted" />
           )}
-          {dayjs(message.created_at).format('HH:mm')}
-          {message.is_edited && !isDeleted && (
-            <span className="ml-1 opacity-60">(edited)</span>
-          )}
-          {isOwn && (
-            <ReceiptTicks receipts={message.receipts} currentUserId={currentUserId} />
+          {isPending ? (
+            <span title="Sending…" style={{ opacity: 0.5, fontSize: 11 }}>⏱</span>
+          ) : (
+            <>
+              {dayjs(message.created_at).format('HH:mm')}
+              {message.is_edited && !isDeleted && (
+                <span className="ml-1 opacity-60">(edited)</span>
+              )}
+              {isOwn && (
+                <ReceiptTicks receipts={message.receipts} currentUserId={currentUserId} />
+              )}
+            </>
           )}
         </span>
 

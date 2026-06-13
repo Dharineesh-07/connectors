@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
 import { useAuth } from './AuthContext'
+import { staleAllMessageCaches } from '../hooks/useMessages'
 
 const SocketContext = createContext(null)
 
@@ -35,6 +36,7 @@ export function SocketProvider({ children }) {
   const wsRef = useRef(null)
   const reconnectTimer = useRef(null)
   const forceRefreshRef = useRef(false)
+  const everConnectedRef = useRef(false)
   const [connected, setConnected] = useState(false)
   const [reconnecting, setReconnecting] = useState(false)
   const [onlineUsers, setOnlineUsers] = useState(new Set())
@@ -76,6 +78,7 @@ export function SocketProvider({ children }) {
       setPresenceReady(false)
       setOnlineUsers(new Set())
       setUserStatuses(new Map())
+      everConnectedRef.current = false
       return
     }
 
@@ -125,9 +128,15 @@ export function SocketProvider({ children }) {
       ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data)
-          
+
           if (msg.type === 'connection:established') {
-            if (alive) setConnected(true)
+            if (alive) {
+              // On reconnect (not initial connect), stale all non-active caches so
+              // messages sent during the outage aren't served from stale cache.
+              if (everConnectedRef.current) staleAllMessageCaches()
+              everConnectedRef.current = true
+              setConnected(true)
+            }
           } else if (msg.type === 'presence:snapshot') {
             const users = msg.data?.users ?? []
             const newStatuses = new Map()
@@ -140,7 +149,7 @@ export function SocketProvider({ children }) {
             setOnlineUsers(newOnline)
             setUserStatuses(newStatuses)
             setPresenceReady(true)
-          } else if (msg.type === 'user:presence') {
+          } else if (msg.type === 'user:presence' || msg.type === 'user:online' || msg.type === 'user:offline') {
             const { user_id, online, status } = msg.data
             if (user_id === user?.id) ownStatusRef.current = online ? status : 'offline'
             setOnlineUsers((prev) => {

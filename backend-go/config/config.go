@@ -27,17 +27,18 @@ type Config struct {
 	AWSAccessKeyID     string
 	AWSSecretAccessKey string
 	// WebRTC / SFU
-	STUNURLs           []string // STUN server URLs advertised to the browser and the SFU
-	TURNURL            string   // comma-separated TURN URLs (e.g. turn:host:3478?transport=tcp)
-	TURNSecret         string   // shared secret — MUST equal coturn static-auth-secret
-	TURNRealm          string   // coturn realm
-	WebRTCNAT1To1IP    string   // host IP the SFU advertises as its ICE host candidate (Docker/NAT)
-	WebRTCUDPPort      int      // fixed UDP port the SFU binds for media (0 = ephemeral range)
-	CORSOrigins        []string
-	GoogleClientID     string
-	GoogleClientSecret string
-	GoogleRedirectURL  string
-	FrontendURL        string
+	STUNURLs              []string // STUN server URLs advertised to the browser and the SFU
+	TURNURL               string   // comma-separated TURN URLs (e.g. turn:host:3478?transport=tcp)
+	TURNSecret            string   // shared secret — MUST equal coturn static-auth-secret
+	TURNRealm             string   // coturn realm
+	WebRTCNAT1To1IP       string   // host IP the SFU advertises as its ICE host candidate (Docker/NAT)
+	WebRTCUDPPort         int      // fixed UDP port the SFU binds for media (0 = ephemeral range)
+	MaxVideoTracksPerRoom int      // max simultaneous video streams in one room (0 = unlimited)
+	CORSOrigins           []string
+	GoogleClientID        string
+	GoogleClientSecret    string
+	GoogleRedirectURL     string
+	FrontendURL           string
 }
 
 // ICEServer is the JSON shape consumed by the browser's RTCPeerConnection
@@ -81,6 +82,7 @@ func Load() {
 	maxSize, _ := strconv.ParseInt(getEnv("MAX_FILE_SIZE_MB", "10"), 10, 64)
 	expiryDays, _ := strconv.Atoi(getEnv("FILE_EXPIRY_DAYS", "30"))
 	udpPort, _ := strconv.Atoi(getEnv("WEBRTC_UDP_PORT", "0"))
+	maxVideoTracks, _ := strconv.Atoi(getEnv("ROOM_MAX_VIDEO_TRACKS", "8"))
 
 	App = &Config{
 		DatabaseURL:        getEnv("DATABASE_URL", ""),
@@ -98,9 +100,10 @@ func Load() {
 		TURNURL:            getEnv("TURN_URL", ""),
 		TURNSecret:         getEnv("TURN_SECRET", ""),
 		TURNRealm:          getEnv("TURN_REALM", "orgchat"),
-		WebRTCNAT1To1IP:    getEnv("WEBRTC_NAT_1TO1_IP", ""),
-		WebRTCUDPPort:      udpPort,
-		CORSOrigins:        strings.Split(getEnv("CORS_ORIGINS", "http://localhost:3000"), ","),
+		WebRTCNAT1To1IP:       getEnv("WEBRTC_NAT_1TO1_IP", ""),
+		WebRTCUDPPort:         udpPort,
+		MaxVideoTracksPerRoom: maxVideoTracks,
+		CORSOrigins:           strings.Split(getEnv("CORS_ORIGINS", "http://localhost:3000"), ","),
 		GoogleClientID:     getEnv("GOOGLE_CLIENT_ID", ""),
 		GoogleClientSecret: getEnv("GOOGLE_CLIENT_SECRET", ""),
 		GoogleRedirectURL:  getEnv("GOOGLE_REDIRECT_URL", "http://localhost:8000/api/google/calendar/callback"),

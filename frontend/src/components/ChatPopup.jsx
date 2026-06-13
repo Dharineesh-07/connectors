@@ -10,6 +10,8 @@ import {
   VideoCameraIcon,
   InformationCircleIcon,
   UsersIcon,
+  ArrowsPointingOutIcon,
+  ArrowsPointingInIcon,
 } from '@heroicons/react/24/outline'
 import { getConversation, listConversations } from '../api/conversations'
 import {
@@ -56,6 +58,7 @@ export default function ChatPopup({ conversationId, minimized }) {
 
   const [showInfo, setShowInfo] = useState(false)
   const [showMembers, setShowMembers] = useState(false)
+  const [isFullscreen, setIsFullscreen] = useState(false)
   const [threadMessage, setThreadMessage] = useState(null)
   const [showScheduleModal, setShowScheduleModal] = useState(false)
   const [pinnedMessageIds, setPinnedMessageIds] = useState(new Set())
@@ -200,13 +203,19 @@ export default function ChatPopup({ conversationId, minimized }) {
     return () => observer.disconnect()
   }, [handleLoadMore])
 
-  // Load pinned message ids
+  const { data: pinnedMsgs = [] } = useQuery(
+    ['pinned-messages', conversationId],
+    () => getPinnedMessages(conversationId),
+    { enabled: !!conversationId }
+  )
+
   useEffect(() => {
-    if (!conversationId) return
-    getPinnedMessages(conversationId)
-      .then((pins) => setPinnedMessageIds(new Set(pins.map((p) => p.message_id))))
-      .catch(() => {})
-  }, [conversationId])
+    setPinnedMessageIds((prev) => {
+      const next = new Set(pinnedMsgs.map((p) => p.message_id))
+      if (prev.size === next.size && [...next].every((id) => prev.has(id))) return prev
+      return next
+    })
+  }, [pinnedMsgs])
 
   // Clear state when conversation changes
   useEffect(() => {
@@ -379,8 +388,11 @@ export default function ChatPopup({ conversationId, minimized }) {
     <>
     <div
       ref={popupRef}
-      className="flex flex-col rounded-t-xl overflow-hidden flex-shrink-0"
-      style={{
+      className={isFullscreen
+        ? 'fixed inset-0 z-[100] flex flex-col overflow-hidden'
+        : 'flex flex-col rounded-t-xl overflow-hidden flex-shrink-0'
+      }
+      style={isFullscreen ? { background: 'var(--cn-white)' } : {
         width: minimized ? 180 : popupWidth,
         boxShadow: isDragging ? '0 16px 48px rgba(0,0,0,0.35)' : '0 8px 32px rgba(0,0,0,0.25)',
         border: '1px solid var(--cn-gray-200)',
@@ -414,52 +426,63 @@ export default function ChatPopup({ conversationId, minimized }) {
             <div className="flex items-center gap-0.5" onClick={(e) => e.stopPropagation()}>
               <button
                 onClick={() => handleCall('audio')}
-                className="p-1 text-white/80 hover:text-white hover:bg-white/20 rounded transition-colors"
+                className={`${isFullscreen ? 'p-1.5' : 'p-1'} text-white/80 hover:text-white hover:bg-white/20 rounded transition-colors`}
                 title="Voice call"
               >
-                <PhoneIcon className="w-3.5 h-3.5" />
+                <PhoneIcon className={isFullscreen ? 'w-5 h-5' : 'w-3.5 h-3.5'} />
               </button>
               <button
                 onClick={() => handleCall('video')}
-                className="p-1 text-white/80 hover:text-white hover:bg-white/20 rounded transition-colors"
+                className={`${isFullscreen ? 'p-1.5' : 'p-1'} text-white/80 hover:text-white hover:bg-white/20 rounded transition-colors`}
                 title="Video call"
               >
-                <VideoCameraIcon className="w-3.5 h-3.5" />
+                <VideoCameraIcon className={isFullscreen ? 'w-5 h-5' : 'w-3.5 h-3.5'} />
               </button>
               {!isDirect && (
                 <button
                   onClick={() => { setShowMembers((v) => !v); setShowInfo(false) }}
-                  className={`p-1 rounded transition-colors ${showMembers ? 'text-white bg-white/25' : 'text-white/80 hover:text-white hover:bg-white/20'}`}
+                  className={`${isFullscreen ? 'p-1.5' : 'p-1'} rounded transition-colors ${showMembers ? 'text-white bg-white/25' : 'text-white/80 hover:text-white hover:bg-white/20'}`}
                   title="Group members"
                 >
-                  <UsersIcon className="w-3.5 h-3.5" />
+                  <UsersIcon className={isFullscreen ? 'w-5 h-5' : 'w-3.5 h-3.5'} />
                 </button>
               )}
               <button
                 onClick={() => { setShowInfo((v) => !v); setShowMembers(false) }}
-                className={`p-1 rounded transition-colors ${showInfo ? 'text-white bg-white/25' : 'text-white/80 hover:text-white hover:bg-white/20'}`}
+                className={`${isFullscreen ? 'p-1.5' : 'p-1'} rounded transition-colors ${showInfo ? 'text-white bg-white/25' : 'text-white/80 hover:text-white hover:bg-white/20'}`}
                 title="Conversation info"
               >
-                <InformationCircleIcon className="w-3.5 h-3.5" />
+                <InformationCircleIcon className={isFullscreen ? 'w-5 h-5' : 'w-3.5 h-3.5'} />
               </button>
             </div>
           )}
 
-          {/* Minimize / Close — always visible */}
+          {/* Minimize / Fullscreen / Close — always visible */}
           <div className="flex items-center gap-0.5" onClick={(e) => e.stopPropagation()}>
+            {!minimized && (
+              <button
+                onClick={() => setIsFullscreen((v) => !v)}
+                className={`${isFullscreen ? 'p-1.5' : 'p-1'} text-white/80 hover:text-white hover:bg-white/20 rounded transition-colors`}
+                title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+              >
+                {isFullscreen
+                  ? <ArrowsPointingInIcon className="w-5 h-5" />
+                  : <ArrowsPointingOutIcon className="w-4 h-4" />}
+              </button>
+            )}
             <button
-              onClick={() => minimized ? maximizeChat(conversationId) : minimizeChat(conversationId)}
-              className="p-1 text-white/80 hover:text-white hover:bg-white/20 rounded transition-colors"
+              onClick={() => { setIsFullscreen(false); minimized ? maximizeChat(conversationId) : minimizeChat(conversationId) }}
+              className={`${isFullscreen ? 'p-1.5' : 'p-1'} text-white/80 hover:text-white hover:bg-white/20 rounded transition-colors`}
               title={minimized ? 'Expand' : 'Minimize'}
             >
-              {minimized ? <ChevronUpIcon className="w-4 h-4" /> : <MinusIcon className="w-4 h-4" />}
+              {minimized ? <ChevronUpIcon className="w-4 h-4" /> : <MinusIcon className={isFullscreen ? 'w-5 h-5' : 'w-4 h-4'} />}
             </button>
             <button
               onClick={() => closeChat(conversationId)}
-              className="p-1 text-white/80 hover:text-white hover:bg-white/20 rounded transition-colors"
+              className={`${isFullscreen ? 'p-1.5' : 'p-1'} text-white/80 hover:text-white hover:bg-white/20 rounded transition-colors`}
               title="Close"
             >
-              <XMarkIcon className="w-4 h-4" />
+              <XMarkIcon className={isFullscreen ? 'w-5 h-5' : 'w-4 h-4'} />
             </button>
           </div>
         </div>
@@ -499,8 +522,8 @@ export default function ChatPopup({ conversationId, minimized }) {
             <>
               <div
                 ref={scrollContainerRef}
-                className="overflow-y-auto px-3 py-2 cn-chat-bg"
-                style={{ height: popupHeight }}
+                className={`overflow-y-auto px-3 py-2 cn-chat-bg${isFullscreen ? ' flex-1' : ''}`}
+                style={isFullscreen ? undefined : { height: popupHeight }}
               >
                 <div ref={topSentinelRef} />
                 {loading && (
@@ -556,13 +579,14 @@ export default function ChatPopup({ conversationId, minimized }) {
                 onSchedule={() => setShowScheduleModal(true)}
                 replyMessage={replyMessage}
                 onCancelReply={() => setReplyMessage(null)}
+                isFullscreen={isFullscreen}
               />
             </>
           )
         )}
 
-        {/* Resize handle — bottom-right corner, only when expanded */}
-        {!minimized && (
+        {/* Resize handle — bottom-right corner, only when expanded and not fullscreen */}
+        {!minimized && !isFullscreen && (
           <div
             onMouseDown={handleResizeMouseDown}
             style={{

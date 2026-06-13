@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from 'react'
-import { PhoneIcon, VideoCameraIcon, MagnifyingGlassIcon, InformationCircleIcon, Bars3Icon, UsersIcon, LockClosedIcon, LockOpenIcon, CalendarDaysIcon, PencilSquareIcon } from '@heroicons/react/24/outline'
+import { PhoneIcon, VideoCameraIcon, MagnifyingGlassIcon, InformationCircleIcon, Bars3Icon, UsersIcon, LockClosedIcon, LockOpenIcon, CalendarDaysIcon, PencilSquareIcon, ArrowsPointingOutIcon, ArrowsPointingInIcon } from '@heroicons/react/24/outline'
 
 function PinIcon({ className }) {
   return (
@@ -13,7 +13,7 @@ import UserAvatar from './UserAvatar'
 import { useOnlineUsers } from '../hooks/useOnlineUsers'
 import { useAuth } from '../context/AuthContext'
 
-export default function ConversationHeader({ conversation, onCall, onToggleSearch, onToggleInfo, onToggleMembers, onTogglePinned, onToggleSidebar, onToggleE2EE, onJumpToDate, onToggleWhiteboard }) {
+export default function ConversationHeader({ conversation, onCall, onToggleSearch, onToggleInfo, onToggleMembers, onTogglePinned, onToggleSidebar, onToggleE2EE, onJumpToDate, onToggleWhiteboard, isFullscreen, onToggleFullscreen }) {
   const { user } = useAuth()
   const [showDatePicker, setShowDatePicker] = useState(false)
   const datePickerRef = useRef(null)
@@ -150,6 +150,17 @@ export default function ConversationHeader({ conversation, onCall, onToggleSearc
         >
           <InformationCircleIcon className="w-5 h-5" />
         </button>
+        {onToggleFullscreen && (
+          <button
+            onClick={onToggleFullscreen}
+            className="p-2 text-cn-gray-400 hover:text-cn-blue hover:bg-cn-blue-light rounded-full transition-fast"
+            title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+          >
+            {isFullscreen
+              ? <ArrowsPointingInIcon className="w-5 h-5" />
+              : <ArrowsPointingOutIcon className="w-5 h-5" />}
+          </button>
+        )}
         <button
           onClick={() => onCall?.('audio')}
           className="p-2 text-cn-blue hover:bg-cn-blue-light rounded-full transition-fast"
