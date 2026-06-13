@@ -20,7 +20,7 @@ import { getIceServers } from '../api/calls'
 const FALLBACK_ICE = [{ urls: ['stun:stun.l.google.com:19302'] }]
 const MAX_RECOVER = 3 // peer rebuild attempts after an ICE failure before giving up
 
-export function useSfuCall({ room, isVideo, localUser, onConnected, onError, onEnd }) {
+export function useSfuCall({ room, isVideo, localUser, initialCamOff = false, initialMicOff = false, onConnected, onError, onEnd }) {
   const { on, emit } = useSocket()
 
   const [status, setStatus] = useState('connecting') // connecting | connected | reconnecting | failed | disconnected
@@ -30,6 +30,8 @@ export function useSfuCall({ room, isVideo, localUser, onConnected, onError, onE
   const [cameraEnabled, setCameraEnabled] = useState(isVideo)
   const [screenSharing, setScreenSharing] = useState(false)
   const [videoCapped, setVideoCapped] = useState(false) // true when server dropped our video (room limit)
+  const [connectionQuality, setConnectionQuality] = useState('good') // 'good' | 'fair' | 'poor'
+  const [speakingWhileMuted, setSpeakingWhileMuted] = useState(false)
 
   const pcRef = useRef(null)
   const localStreamRef = useRef(null)        // raw getUserMedia stream
@@ -79,6 +81,7 @@ export function useSfuCall({ room, isVideo, localUser, onConnected, onError, onE
       videoStream: localVideoStreamRef.current,
       audioStream: null, // never play back local audio (echo)
       videoMuted: local.camMuted,
+      micMuted: !micEnabledRef.current,
       isDesktop: local.isDesktop,
     }]
     remotesRef.current.forEach((r, id) => {
@@ -91,6 +94,7 @@ export function useSfuCall({ room, isVideo, localUser, onConnected, onError, onE
         videoStream: hasVideo ? r.videoStream : null,
         audioStream: r.audioStream,
         videoMuted: r.camMuted || !hasVideo,
+        micMuted: r.micMuted,
         isDesktop: false,
       })
     })
@@ -100,7 +104,7 @@ export function useSfuCall({ room, isVideo, localUser, onConnected, onError, onE
   const getRemote = (userID) => {
     let r = remotesRef.current.get(userID)
     if (!r) {
-      r = { videoStream: null, audioStream: null, camMuted: false }
+      r = { videoStream: null, audioStream: null, camMuted: false, micMuted: false }
       remotesRef.current.set(userID, r)
     }
     return r
@@ -223,7 +227,7 @@ export function useSfuCall({ room, isVideo, localUser, onConnected, onError, onE
       // Join the SFU room — the server responds with an offer — and announce our
       // current camera state to whoever is already there.
       emitRef.current('webrtc:join', { room })
-      emitRef.current('call:signal', { room, payload: { type: 'media_state', cam: !localStateRef.current.camMuted } })
+      emitRef.current('call:signal', { room, payload: { type: 'media_state', cam: !localStateRef.current.camMuted, mic: micEnabledRef.current } })
     }
 
     const setup = async () => {
@@ -258,9 +262,22 @@ export function useSfuCall({ room, isVideo, localUser, onConnected, onError, onE
       }
       if (disposed) { stream.getTracks().forEach((t) => t.stop()); return }
       localStreamRef.current = stream
-      localVideoStreamRef.current = new MediaStream(stream.getVideoTracks())
-      localStateRef.current.camMuted = stream.getVideoTracks().length === 0
-      setCameraEnabled(stream.getVideoTracks().length > 0)
+      const videoTracks = stream.getVideoTracks()
+      if (initialCamOff && videoTracks.length > 0) {
+        // Stop the track so the OS releases the hardware and the camera LED goes off.
+        videoTracks[0].stop()
+        localStreamRef.current.removeTrack(videoTracks[0])
+        localStateRef.current.camMuted = true
+      } else {
+        localStateRef.current.camMuted = videoTracks.length === 0
+      }
+      if (initialMicOff) {
+        stream.getAudioTracks().forEach(t => { t.enabled = false })
+        micEnabledRef.current = false
+        setMicEnabled(false)
+      }
+      localVideoStreamRef.current = new MediaStream(initialCamOff ? [] : videoTracks)
+      setCameraEnabled(!localStateRef.current.camMuted)
 
       // 3) Open the peer + join, then arm reconnect handling.
       startSpeakingDetection()
@@ -312,7 +329,7 @@ export function useSfuCall({ room, isVideo, localUser, onConnected, onError, onE
       rosterRef.current = map
       // A roster that grew means someone new joined — re-announce our camera
       // state so their tile renders correctly.
-      emitRef.current('call:signal', { room, payload: { type: 'media_state', cam: !localStateRef.current.camMuted } })
+      emitRef.current('call:signal', { room, payload: { type: 'media_state', cam: !localStateRef.current.camMuted, mic: micEnabledRef.current } })
       commit()
     })
 
@@ -322,7 +339,8 @@ export function useSfuCall({ room, isVideo, localUser, onConnected, onError, onE
       const payload = data.payload || {}
       if (payload.type === 'media_state') {
         const remote = getRemote(fromId)
-        remote.camMuted = payload.cam === false
+        if (payload.cam !== undefined) remote.camMuted = payload.cam === false
+        if (payload.mic !== undefined) remote.micMuted = payload.mic === false
         commit()
         return
       }
@@ -401,23 +419,27 @@ export function useSfuCall({ room, isVideo, localUser, onConnected, onError, onE
     }
 
     const tick = () => {
+      const localId = localUser?.id || 'local'
       // Local mic
-      ensureAnalyser(localUser?.id || 'local', localStreamRef.current)
+      ensureAnalyser(localId, localStreamRef.current)
       // Remotes
       remotesRef.current.forEach((r, id) => ensureAnalyser(id, r.audioStream))
 
       let loudest = null
       let max = 0
+      let localAvg = 0
       analysersRef.current.forEach(({ analyser, data }, id) => {
         analyser.getByteFrequencyData(data)
         let sum = 0
         for (let i = 0; i < data.length; i++) sum += data[i]
         const avg = sum / data.length
+        if (id === localId) localAvg = avg
         // Local counts as speaking only when the mic is live.
-        if (id === (localUser?.id || 'local') && !micEnabledRef.current) return
+        if (id === localId && !micEnabledRef.current) return
         if (avg > max) { max = avg; loudest = id }
       })
       setSpeakingId(max > 12 ? loudest : null)
+      setSpeakingWhileMuted(localAvg > 12 && !micEnabledRef.current)
       speakingRafRef.current = requestAnimationFrame(tick)
     }
     speakingRafRef.current = requestAnimationFrame(tick)
@@ -431,34 +453,74 @@ export function useSfuCall({ room, isVideo, localUser, onConnected, onError, onE
     audioCtxRef.current = null
   }
 
+  // Returns 0–1 RMS level for any participant id. Called by AudioLevelBars on rAF.
+  const getAudioLevel = useCallback((id) => {
+    const entry = analysersRef.current.get(id)
+    if (!entry) return 0
+    const { analyser, data } = entry
+    analyser.getByteFrequencyData(data)
+    let sum = 0
+    for (let i = 0; i < data.length; i++) sum += data[i]
+    return Math.min(1, (sum / data.length) / 30)
+  }, [])
+
   useEffect(() => { micEnabledRef.current = micEnabled }, [micEnabled])
+
+  // Poll RTCPeerConnection stats every 5 s to derive an overall quality signal.
+  useEffect(() => {
+    if (!room) return
+    const id = setInterval(async () => {
+      const pc = pcRef.current
+      if (!pc || pc.connectionState !== 'connected') return
+      try {
+        const stats = await pc.getStats()
+        let rtt = null
+        stats.forEach((r) => {
+          if (r.type === 'candidate-pair' && r.nominated && r.currentRoundTripTime != null) {
+            rtt = r.currentRoundTripTime
+          }
+        })
+        if (rtt === null) return
+        if (rtt < 0.15) setConnectionQuality('good')
+        else if (rtt < 0.35) setConnectionQuality('fair')
+        else setConnectionQuality('poor')
+      } catch { /* */ }
+    }, 5000)
+    return () => clearInterval(id)
+  }, [room])
 
   // ── Controls ────────────────────────────────────────────────────────────────
   const toggleMic = useCallback(() => {
     const track = localStreamRef.current?.getAudioTracks()[0]
     if (!track) return
     track.enabled = !track.enabled
+    micEnabledRef.current = track.enabled
     setMicEnabled(track.enabled)
-  }, [])
+    emitRef.current('call:signal', { room, payload: { type: 'media_state', mic: track.enabled } })
+    commit()
+  }, [room, commit])
 
   const toggleCamera = useCallback(async () => {
     if (localStateRef.current.isDesktop) return // can't toggle while screen-sharing
     const stream = localStreamRef.current
     const existing = stream?.getVideoTracks()[0]
-    if (existing) {
-      existing.enabled = !existing.enabled
-      localStateRef.current.camMuted = !existing.enabled
-      setCameraEnabled(existing.enabled)
-      emitRef.current('call:signal', { room, payload: { type: 'media_state', cam: existing.enabled } })
+
+    if (existing && existing.readyState !== 'ended') {
+      // Camera is on — stop the track to release hardware so the OS camera LED turns off.
+      // (track.enabled = false only pauses output; the device stays open.)
+      existing.stop()
+      try { stream.removeTrack(existing) } catch { /* */ }
+      localVideoStreamRef.current = new MediaStream()
+      localStateRef.current.camMuted = true
+      setCameraEnabled(false)
+      emitRef.current('call:signal', { room, payload: { type: 'media_state', cam: false } })
       commit()
       return
     }
-    // No camera track yet — typical of an audio call, or the camera was declined
-    // at join / dropped after a screen-share. Acquire one now. A sole-offerer SFU
-    // won't pick up a track attached after negotiation (replaceTrack onto the
-    // spare sender leaves its m-line non-sending and the SFU never re-offers), so
-    // we rebuild the peer with the camera present from join — the same path
-    // screen-share takes. establishPeer re-announces cam:true to the room.
+
+    // Camera is off — acquire hardware and rebuild the peer so the SFU picks up
+    // the new track. A sole-offerer SFU won't re-offer for a replaceTrack call,
+    // so the same rebuild path used by screen-share is the only reliable option.
     if (!stream || !pcRef.current) return
     let track
     try {
@@ -469,8 +531,8 @@ export function useSfuCall({ room, isVideo, localUser, onConnected, onError, onE
       return
     }
     if (!track) return
-    const oldVid = stream.getVideoTracks()[0]
-    if (oldVid) { try { stream.removeTrack(oldVid); oldVid.stop() } catch { /* */ } }
+    const stale = stream.getVideoTracks()[0]
+    if (stale) { try { stream.removeTrack(stale); stale.stop() } catch { /* */ } }
     stream.addTrack(track)
     localVideoStreamRef.current = new MediaStream([track])
     localStateRef.current.camMuted = false
@@ -545,12 +607,82 @@ export function useSfuCall({ room, isVideo, localUser, onConnected, onError, onE
     commit()
   }, [screenSharing, stopScreenShare, commit])
 
+  // Mid-call device swap using replaceTrack — no peer rebuild needed.
+  const replaceAudioDevice = useCallback(async (deviceId) => {
+    const stream = localStreamRef.current
+    if (!stream) return
+    try {
+      const newStream = await navigator.mediaDevices.getUserMedia({
+        audio: { deviceId: { exact: deviceId }, echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
+      })
+      const newTrack = newStream.getAudioTracks()[0]
+      if (!newTrack) return
+      const oldTrack = stream.getAudioTracks()[0]
+      if (oldTrack) { stream.removeTrack(oldTrack); oldTrack.stop() }
+      stream.addTrack(newTrack)
+      newTrack.enabled = micEnabledRef.current
+      const pc = pcRef.current
+      if (pc) {
+        const sender = pc.getSenders().find(s => s.track?.kind === 'audio')
+        if (sender) await sender.replaceTrack(newTrack)
+      }
+      // Drop the cached analyser so it reconnects to the new source on the next tick.
+      analysersRef.current.delete(localUser?.id || 'local')
+    } catch (e) {
+      console.warn('replaceAudioDevice failed:', e)
+    }
+  }, [localUser])
+
+  const replaceVideoDevice = useCallback(async (deviceId) => {
+    if (localStateRef.current.isDesktop) return // screen share takes priority
+    const stream = localStreamRef.current
+    if (!stream || !pcRef.current) return
+    try {
+      const newStream = await navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: deviceId } } })
+      const newTrack = newStream.getVideoTracks()[0]
+      if (!newTrack) return
+      const oldTrack = stream.getVideoTracks()[0]
+      if (oldTrack) { stream.removeTrack(oldTrack); oldTrack.stop() }
+      stream.addTrack(newTrack)
+      localVideoStreamRef.current = new MediaStream([newTrack])
+      localStateRef.current.camMuted = false
+      setCameraEnabled(true)
+      if (videoSenderRef.current) await videoSenderRef.current.replaceTrack(newTrack)
+      emitRef.current('call:signal', { room, payload: { type: 'media_state', cam: true, mic: micEnabledRef.current } })
+      commit()
+    } catch (e) {
+      console.warn('replaceVideoDevice failed:', e)
+    }
+  }, [room, commit])
+
   // Broadcast a JSON signal (raise-hand / reaction) to all participants.
   const sendSignal = useCallback((payload) => {
     emitRef.current('call:signal', { room, payload })
   }, [room])
 
   const registerSignalHandler = useCallback((fn) => { signalHandlerRef.current = fn }, [])
+
+  // Drop or restore outbound video quality via RTCRtpSender encoding parameters.
+  const setVideoBandwidth = useCallback(async (mode) => {
+    const sender = videoSenderRef.current
+    if (!sender) return
+    try {
+      const params = sender.getParameters()
+      if (!params.encodings || params.encodings.length === 0) return
+      params.encodings.forEach(enc => {
+        if (mode === 'low') {
+          enc.scaleResolutionDownBy = 2
+          enc.maxBitrate = 150_000
+        } else {
+          delete enc.scaleResolutionDownBy
+          delete enc.maxBitrate
+        }
+      })
+      await sender.setParameters(params)
+    } catch (e) {
+      console.warn('setVideoBandwidth:', e)
+    }
+  }, [])
 
   return {
     status,
@@ -561,10 +693,16 @@ export function useSfuCall({ room, isVideo, localUser, onConnected, onError, onE
     cameraEnabled,
     screenSharing,
     videoCapped,
+    connectionQuality,
+    speakingWhileMuted,
     toggleMic,
     toggleCamera,
     toggleScreenShare,
+    replaceAudioDevice,
+    replaceVideoDevice,
+    setVideoBandwidth,
     sendSignal,
     registerSignalHandler,
+    getAudioLevel,
   }
 }
