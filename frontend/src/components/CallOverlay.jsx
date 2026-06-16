@@ -1,7 +1,17 @@
+import { useEffect, useState } from 'react'
 import { PhoneIcon, PhoneXMarkIcon } from '@heroicons/react/24/solid'
 import UserAvatar from './UserAvatar'
 
 export default function CallOverlay({ incomingCall, onAnswer, onReject }) {
+  const [secondsLeft, setSecondsLeft] = useState(35)
+
+  useEffect(() => {
+    if (!incomingCall) return
+    setSecondsLeft(35)
+    const id = setInterval(() => setSecondsLeft(s => Math.max(0, s - 1)), 1000)
+    return () => clearInterval(id)
+  }, [incomingCall])
+
   if (!incomingCall) return null
 
   const isVideo = incomingCall.type === 'video'
@@ -66,6 +76,9 @@ export default function CallOverlay({ incomingCall, onAnswer, onReject }) {
           </p>
           <p style={{ color: '#64748b', fontSize: '13px', marginTop: '5px' }}>
             Incoming {isVideo ? 'video' : 'voice'} call...
+          </p>
+          <p style={{ color: secondsLeft <= 5 ? '#ef4444' : '#475569', fontSize: '12px', marginTop: '4px', fontVariantNumeric: 'tabular-nums' }}>
+            {secondsLeft}s
           </p>
         </div>
 

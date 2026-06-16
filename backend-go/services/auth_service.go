@@ -42,11 +42,11 @@ func (s *AuthService) validateDomain(email string) error {
 	}
 	allowed := strings.Split(cfg, ",")
 	for _, d := range allowed {
-		if domain[1] == strings.TrimSpace(d) {
+		if strings.EqualFold(domain[1], strings.TrimSpace(d)) {
 			return nil
 		}
 	}
-	return fmt.Errorf("only %s email addresses are allowed", cfg)
+	return errors.New("Invalid credentials")
 }
 
 func (s *AuthService) config() string {

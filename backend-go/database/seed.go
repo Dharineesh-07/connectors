@@ -31,7 +31,7 @@ var seedUsers = []seedUser{
 	{"mohanasundaris@compunet.work", "Mohanasundari", "employee", "Mohanasundari@123"},
 	{"santhoshkumard@compunet.work", "Santhosh Kumar", "employee", "Santhosh@123"},
 	{"sanjays@compunet.work", "Sanjay", "employee", "Sanjay@123"},
-	{"dharineeeshss@compunet.work", "Dharieesh", "employee", "Dharineesh@123"},
+	{"dharineeshss@compunet.work", "Dharineesh", "employee", "Dharineesh@123"},
 	{"vijayaragavana@compunet.work", "Vijayaragavan", "employee", "Vijay@123"},
 }
 
