@@ -14,6 +14,9 @@ export function useWebRTC() {
   const incomingCallDataRef = useRef(null)
   // client-side fallback timer — fires at 35 s if the backend call:timeout never arrives
   const ringTimerRef = useRef(null)
+  // ringtone Web Audio state
+  const ringCtxRef = useRef(null)
+  const ringIntervalRef = useRef(null)
 
   const [callState, setCallState] = useState('idle')
   const [activeCall, setActiveCall] = useState(null)
@@ -37,7 +40,44 @@ export function useWebRTC() {
     setMissedCalls(prev => prev.filter(c => c.call_id !== callId))
   }, [])
 
+  const stopRingtone = useCallback(() => {
+    clearInterval(ringIntervalRef.current)
+    ringIntervalRef.current = null
+    try { ringCtxRef.current?.close() } catch {}
+    ringCtxRef.current = null
+  }, [])
+
+  const startRingtone = useCallback(() => {
+    if (localStorage.getItem('sound_enabled') === 'false') return
+    stopRingtone()
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)()
+      ringCtxRef.current = ctx
+      if (ctx.state === 'suspended') ctx.resume().catch(() => {})
+      const playRingCycle = () => {
+        const t = ctx.currentTime
+        ;[[0, 480], [0.45, 440]].forEach(([dt, freq]) => {
+          const osc = ctx.createOscillator()
+          const gain = ctx.createGain()
+          osc.connect(gain)
+          gain.connect(ctx.destination)
+          osc.type = 'sine'
+          osc.frequency.value = freq
+          gain.gain.setValueAtTime(0, t + dt)
+          gain.gain.linearRampToValueAtTime(0.3, t + dt + 0.02)
+          gain.gain.setValueAtTime(0.3, t + dt + 0.38)
+          gain.gain.linearRampToValueAtTime(0, t + dt + 0.4)
+          osc.start(t + dt)
+          osc.stop(t + dt + 0.4)
+        })
+      }
+      playRingCycle()
+      ringIntervalRef.current = setInterval(playRingCycle, 2800)
+    } catch {}
+  }, [stopRingtone])
+
   const cleanup = useCallback(() => {
+    stopRingtone()
     clearTimeout(ringTimerRef.current)
     ringTimerRef.current = null
     callIdRef.current = null
@@ -47,7 +87,7 @@ export function useWebRTC() {
     setIncomingCall(null)
     setCallState('idle')
     setWaitingRoom(false)
-  }, [])
+  }, [stopRingtone])
 
   // Called after POST /api/calls/initiate returns.
   // The REST handler now takes care of notifying other members and starting
@@ -69,6 +109,7 @@ export function useWebRTC() {
   // If the call has waiting room enabled the backend returns an empty token —
   // in that case we stay in a "waiting" state until call:admitted arrives.
   const answerCall = useCallback((callInfo) => {
+    stopRingtone()
     clearTimeout(ringTimerRef.current)
     ringTimerRef.current = null
     const callId = callInfo.call_id
@@ -109,9 +150,10 @@ export function useWebRTC() {
     })
     setIncomingCall(null)
     setCallState('active')
-  }, [])
+  }, [stopRingtone])
 
   const rejectCall = useCallback((callId) => {
+    stopRingtone()
     clearTimeout(ringTimerRef.current)
     ringTimerRef.current = null
     incomingCallIdRef.current = null
@@ -119,7 +161,7 @@ export function useWebRTC() {
     emitRef.current('call:reject', { call_id: callId })
     setIncomingCall(null)
     setCallState('idle')
-  }, [])
+  }, [stopRingtone])
 
   const endCall = useCallback(() => {
     if (callIdRef.current) {
@@ -152,6 +194,7 @@ export function useWebRTC() {
       incomingCallDataRef.current = callData
       setIncomingCall(callData)
       setCallState('ringing')
+      startRingtone()
 
       // Client-side fallback: dismiss the ring at 35 s in case the backend
       // call:timeout / call:ended event is never received (e.g. WS drop/reconnect).
@@ -306,8 +349,11 @@ export function useWebRTC() {
       }
     })
 
-    return () => { off1(); off2(); off3(); off4(); off5(); off6c(); off6(); off7(); off8(); off9(); offReconnect() }
-  }, [on, cleanup, addMissedCall])
+    return () => {
+      off1(); off2(); off3(); off4(); off5(); off6c(); off6(); off7(); off8(); off9(); offReconnect()
+      cleanup()
+    }
+  }, [on, cleanup, addMissedCall, startRingtone])
 
   return {
     callState,

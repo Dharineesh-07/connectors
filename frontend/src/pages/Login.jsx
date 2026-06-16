@@ -72,6 +72,15 @@ export default function Login() {
 
   const sanitizeEmail = (val) => val.replace(/[A-Z]/g, (c) => c.toLowerCase())
 
+  // Mirrors backend ValidatePasswordStrength so users get an accurate message instantly.
+  const validatePassword = (pwd) => {
+    if (pwd.length < 8) return 'Password must be at least 8 characters.'
+    if (!/[A-Z]/.test(pwd)) return 'Password must contain at least one uppercase letter.'
+    if (!/[0-9]/.test(pwd)) return 'Password must contain at least one number.'
+    if (!/[^A-Za-z0-9]/.test(pwd)) return 'Password must contain at least one special character.'
+    return ''
+  }
+
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [otp, setOtp] = useState('')
@@ -92,7 +101,7 @@ export default function Login() {
     setLoading(true)
     skipNavRef.current = true
     try {
-      await login(email, password)
+      await login(sanitizeEmail(email), password)
       setLoading(false)
       setTransitioning(true)
       const [conversations, users] = await Promise.all([
@@ -114,11 +123,11 @@ export default function Login() {
     setError('')
     setLoading(true)
     try {
-      await forgotPassword(email)
+      await forgotPassword(sanitizeEmail(email))
       toast.success('OTP sent to your email!')
       setView('reset')
     } catch (err) {
-      setError(err.response?.data?.detail ?? 'Failed to send OTP. Try again.')
+      setError(err.response?.data?.detail ?? 'Could not send the OTP. Please check your email and try again.')
     } finally {
       setLoading(false)
     }
@@ -127,16 +136,25 @@ export default function Login() {
   const handleResetPassword = async (e) => {
     e.preventDefault()
     setError('')
+    if (otp.length !== 6) {
+      setError('Enter the 6-digit code from your email.')
+      return
+    }
+    const pwdError = validatePassword(newPassword)
+    if (pwdError) {
+      setError(pwdError)
+      return
+    }
     setLoading(true)
     try {
-      await resetPassword(email, otp, newPassword)
+      await resetPassword(sanitizeEmail(email), otp, newPassword)
       toast.success('Password reset successful! Please login.')
       setView('login')
       setPassword('')
       setOtp('')
       setNewPassword('')
     } catch (err) {
-      setError(err.response?.data?.detail ?? 'Failed to reset password. Check OTP or password strength.')
+      setError(err.response?.data?.detail ?? 'Could not reset password. The code may be invalid or expired — try again.')
     } finally {
       setLoading(false)
     }
@@ -174,7 +192,7 @@ export default function Login() {
                 type="email"
                 required
                 value={email}
-                onChange={(e) => setEmail(sanitizeEmail(e.target.value))}
+                onChange={(e) => setEmail(e.target.value)}
                 placeholder="you@company.com"
                 style={{ ...INPUT_STYLE, ...(focused === 'email' ? focusStyle : {}) }}
                 onFocus={() => setFocused('email')}
@@ -235,7 +253,7 @@ export default function Login() {
                   required
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
-                  placeholder="••••••••"
+                  placeholder="Enter a new password"
                   style={{ ...INPUT_STYLE, paddingRight: '44px', ...(focused === 'newPwd' ? focusStyle : {}) }}
                   onFocus={() => setFocused('newPwd')}
                   onBlur={() => setFocused('')}
@@ -248,7 +266,7 @@ export default function Login() {
                   {showPwd ? <EyeSlashIcon className="w-5 h-5" /> : <EyeIcon className="w-5 h-5" />}
                 </button>
               </div>
-              <p className="text-[10px] text-cn-gray-400 mt-2 ml-1">Min 8 chars, 1 uppercase, 1 special char</p>
+              <p className="text-[10px] text-cn-gray-400 mt-2 ml-1">Min 8 characters with 1 uppercase, 1 number &amp; 1 special character</p>
             </div>
             <button 
               type="submit" 
@@ -275,8 +293,8 @@ export default function Login() {
               required
               autoFocus
               value={email}
-              onChange={(e) => setEmail(sanitizeEmail(e.target.value))}
-              placeholder="you@company.com"
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="Enter Email"
               style={{ ...INPUT_STYLE, ...(focused === 'email' ? focusStyle : {}) }}
               onFocus={() => setFocused('email')}
               onBlur={() => setFocused('')}
@@ -300,7 +318,7 @@ export default function Login() {
                 required
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••"
+                placeholder="Enter password"
                 style={{ ...INPUT_STYLE, paddingRight: '44px', ...(focused === 'password' ? focusStyle : {}) }}
                 onFocus={() => setFocused('password')}
                 onBlur={() => setFocused('')}

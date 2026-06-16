@@ -346,7 +346,7 @@ export default function CallHistoryPage() {
               className="p-2 rounded-lg text-cn-gray-400 hover:text-cn-blue hover:bg-cn-blue-light transition-all duration-200"
               title="Refresh"
             >
-              <ArrowPathIcon className="w-4 h-4" />
+              <ArrowPathIcon className={`w-4 h-4 ${isFetching ? 'animate-spin' : ''}`} />
             </button>
           </div>
 
@@ -383,14 +383,7 @@ export default function CallHistoryPage() {
             </div>
           ) : (
             <div className="relative">
-              {isFetching && (
-                <div className="absolute inset-0 z-10 flex items-center justify-center rounded-b-xl"
-                  style={{ background: 'rgba(var(--cn-white-rgb, 255,255,255), 0.75)', backdropFilter: 'blur(2px)' }}
-                >
-                  <Loader variant="block" />
-                </div>
-              )}
-              <div className={`divide-y divide-cn-gray-200 transition-opacity duration-200 ${isFetching ? 'opacity-40' : 'opacity-100'}`}>
+              <div className="divide-y divide-cn-gray-200">
                 {calls.map((call, i) => (
                   <CallRow
                     key={call.id}

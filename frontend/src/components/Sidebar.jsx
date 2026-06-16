@@ -21,6 +21,9 @@ import {
   ArchiveBoxArrowDownIcon,
   BackspaceIcon,
   TrashIcon,
+  InformationCircleIcon,
+  FolderMinusIcon,
+  FolderPlusIcon,
 } from '@heroicons/react/24/outline'
 import dayjs from 'dayjs'
 import toast from 'react-hot-toast'
@@ -36,47 +39,121 @@ import ProfileSettingsModal from './ProfileSettingsModal'
 import AdminMenuModal from './AdminMenuModal'
 import { useChatPopup } from '../context/ChatPopupContext'
 
-function ConfirmDialog({ title, message, onConfirm, onCancel, confirmLabel = 'Confirm', danger = false }) {
+function ConfirmDialog({ title, message, onConfirm, onCancel, confirmLabel = 'Confirm', danger = false, icon: Icon }) {
+  const ToneIcon = Icon || (danger ? TrashIcon : InformationCircleIcon)
   return (
     <div
       className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4"
       onMouseDown={onCancel}
     >
       <div
-        className="w-full max-w-sm overflow-hidden rounded-2xl border border-white/10 shadow-2xl animate-cn-fade-up"
-        style={{ background: 'linear-gradient(145deg, #1A202C 0%, #2D3748 100%)' }}
+        className="w-full max-w-sm overflow-hidden rounded-lg border-2 border-cn-gray-200 bg-cn-white shadow-modal ring-1 ring-black/5 animate-cn-fade-up"
         onMouseDown={(e) => e.stopPropagation()}
       >
-        <div className="px-6 pt-6 pb-4 flex flex-col items-center text-center gap-3">
+        <div className="h-1 cn-accent-bar" />
+        <div className="px-6 pt-7 pb-5 flex flex-col items-center text-center gap-3">
           <div
-            className="w-12 h-12 rounded-full flex items-center justify-center text-xl"
-            style={{ background: danger ? 'rgba(204,51,51,0.15)' : 'rgba(34,119,170,0.15)' }}
+            className={`w-14 h-14 rounded-full flex items-center justify-center ring-8 ${
+              danger
+                ? 'bg-cn-red-light text-cn-red ring-cn-red-light/40'
+                : 'bg-cn-blue-light text-cn-blue ring-cn-blue-light/40'
+            }`}
           >
-            {danger ? '🗑️' : 'ℹ️'}
+            <ToneIcon className="w-6 h-6" />
           </div>
           {title && (
-            <h3 className="text-base font-bold text-white">{title}</h3>
+            <h3 className="text-lg font-bold text-cn-charcoal">{title}</h3>
           )}
-          <p className="text-sm text-white/60 leading-relaxed">{message}</p>
+          <p className="text-sm text-cn-gray-400 leading-relaxed">{message}</p>
         </div>
-        <div className="flex gap-2 px-6 pb-6">
+        <div className="flex items-center gap-3 px-6 pb-6">
           <button
             type="button"
             onClick={onCancel}
-            className="flex-1 py-2.5 rounded-xl border border-white/20 text-white/70 hover:text-white hover:border-white/40 text-sm font-semibold transition-all"
+            className="flex-1 rounded-full border-2 border-cn-gray-200 px-4 py-2.5 text-sm font-semibold text-cn-gray-600 hover:bg-cn-gray-100 hover:text-cn-gray-800 transition-fast"
           >
             Cancel
           </button>
           <button
             type="button"
             onClick={onConfirm}
-            className={`flex-1 py-2.5 rounded-xl text-white font-bold text-sm transition-all shadow-lg ${
+            autoFocus
+            className={`flex-1 rounded-full px-4 py-2.5 text-sm font-semibold text-white shadow-card transition-fast ${
               danger
-                ? 'bg-cn-red hover:bg-cn-red-dark shadow-red-900/30'
-                : 'bg-cn-blue hover:bg-cn-blue-dark shadow-cn-blue/20'
+                ? 'bg-cn-red hover:bg-cn-red-dark'
+                : 'bg-cn-blue hover:bg-cn-blue-dark'
             }`}
           >
             {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function SectionModal({ onClose, onCreate }) {
+  const [name, setName] = useState('')
+  const [error, setError] = useState('')
+
+  const submit = () => {
+    const trimmed = name.trim()
+    if (!trimmed) { setError('Section name is required'); return }
+    onCreate(trimmed)
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/55 backdrop-blur-sm px-4"
+      onMouseDown={onClose}
+    >
+      <div
+        className="w-full max-w-sm overflow-hidden rounded-lg border border-cn-gray-200 bg-cn-white shadow-modal animate-cn-fade-up"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div className="h-1 cn-accent-bar" />
+        <div className="flex items-center justify-between px-5 py-4 border-b border-cn-gray-200">
+          <div>
+            <h2 className="font-bold text-cn-charcoal">New Section</h2>
+            <p className="text-xs text-cn-gray-400 mt-0.5">Group conversations under a label</p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-1.5 rounded-full text-cn-gray-400 hover:text-cn-red hover:bg-cn-red-light transition-fast"
+            aria-label="Close"
+            title="Close"
+          >
+            <XMarkIcon className="w-5 h-5" />
+          </button>
+        </div>
+        <div className="px-5 py-4">
+          <input
+            autoFocus
+            value={name}
+            onChange={(e) => { setName(e.target.value); setError('') }}
+            onKeyDown={(e) => { if (e.key === 'Enter') submit(); if (e.key === 'Escape') onClose() }}
+            placeholder="Section name"
+            className={`w-full rounded-md border bg-cn-gray-100 px-3.5 py-2.5 text-sm text-cn-gray-800 placeholder-cn-gray-400 focus:outline-none transition-fast ${
+              error ? 'border-cn-red focus:border-cn-red' : 'border-cn-gray-200 focus:border-cn-blue'
+            }`}
+          />
+          {error && <p className="mt-1 text-xs text-cn-red font-medium">{error}</p>}
+        </div>
+        <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-cn-gray-200">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-full px-4 py-2 text-sm font-semibold text-cn-gray-500 hover:text-cn-gray-700 transition-fast"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={submit}
+            className="rounded-full bg-cn-blue px-4 py-2 text-sm font-semibold text-white shadow-card hover:bg-cn-blue-dark transition-fast"
+          >
+            Create
           </button>
         </div>
       </div>
@@ -92,6 +169,7 @@ function FolderSection({ folder, conversations, currentUserId, onlineUsers, user
   const [isEditing, setIsEditing] = useState(false)
   const [editName, setEditName] = useState(folder.name)
   const inputRef = useRef(null)
+  const ignoreBlurRef = useRef(false)
 
   const folderConvs = conversations.filter((c) => folder.conversationIds.includes(c.id))
 
@@ -108,6 +186,11 @@ function FolderSection({ folder, conversations, currentUserId, onlineUsers, user
     const name = editName.trim()
     if (name && name !== folder.name) onMoveToFolder('__rename__', folder.id, name)
     setIsEditing(false)
+  }
+
+  const handleBlur = () => {
+    if (ignoreBlurRef.current) { ignoreBlurRef.current = false; return }
+    commitRename()
   }
 
   const unreadCount = folderConvs.reduce((n, c) => n + (c.unread_count || 0), 0)
@@ -132,8 +215,8 @@ function FolderSection({ folder, conversations, currentUserId, onlineUsers, user
               ref={inputRef}
               value={editName}
               onChange={(e) => setEditName(e.target.value)}
-              onBlur={commitRename}
-              onKeyDown={(e) => { if (e.key === 'Enter') commitRename(); if (e.key === 'Escape') { setEditName(folder.name); setIsEditing(false) } }}
+              onBlur={handleBlur}
+              onKeyDown={(e) => { if (e.key === 'Enter') { ignoreBlurRef.current = true; commitRename() } if (e.key === 'Escape') { ignoreBlurRef.current = true; setEditName(folder.name); setIsEditing(false) } }}
               className="flex-1 bg-transparent outline-none border-b border-cn-blue text-cn-charcoal text-xs font-semibold"
               onClick={(e) => e.stopPropagation()}
               autoFocus
@@ -147,16 +230,35 @@ function FolderSection({ folder, conversations, currentUserId, onlineUsers, user
             </span>
           )}
         </button>
-        <button
-          onClick={(e) => { e.stopPropagation(); setIsEditing(true); setTimeout(() => inputRef.current?.focus(), 0) }}
-          className="p-0.5 text-cn-gray-400 hover:text-cn-gray-600 transition-fast flex-shrink-0"
-          title="Rename folder"
-        >✎</button>
-        <button
-          onClick={(e) => { e.stopPropagation(); onMoveToFolder('__delete__', folder.id) }}
-          className="p-0.5 text-cn-gray-400 hover:text-cn-red transition-fast flex-shrink-0"
-          title="Delete folder"
-        >✕</button>
+        {isEditing ? (
+          <>
+            <button
+              onMouseDown={() => { ignoreBlurRef.current = true }}
+              onClick={(e) => { e.stopPropagation(); ignoreBlurRef.current = false; commitRename() }}
+              className="p-0.5 text-green-500 hover:text-green-700 transition-fast flex-shrink-0"
+              title="Save"
+            ><CheckIcon className="w-3.5 h-3.5" /></button>
+            <button
+              onMouseDown={() => { ignoreBlurRef.current = true }}
+              onClick={(e) => { e.stopPropagation(); ignoreBlurRef.current = false; setEditName(folder.name); setIsEditing(false) }}
+              className="p-0.5 text-cn-gray-400 hover:text-cn-gray-600 transition-fast flex-shrink-0"
+              title="Cancel"
+            ><XMarkIcon className="w-3.5 h-3.5" /></button>
+          </>
+        ) : (
+          <>
+            <button
+              onClick={(e) => { e.stopPropagation(); setIsEditing(true); setTimeout(() => inputRef.current?.focus(), 0) }}
+              className="p-0.5 text-cn-gray-400 hover:text-cn-gray-600 transition-fast flex-shrink-0"
+              title="Rename folder"
+            ><PencilSquareIcon className="w-3.5 h-3.5" /></button>
+            <button
+              onClick={(e) => { e.stopPropagation(); onMoveToFolder('__delete__', folder.id) }}
+              className="p-0.5 text-cn-gray-400 hover:text-cn-red transition-fast flex-shrink-0"
+              title="Delete folder"
+            ><XMarkIcon className="w-3.5 h-3.5" /></button>
+          </>
+        )}
       </div>
 
       {/* Conversations in folder */}
@@ -338,7 +440,7 @@ function ConvItem({ conv, isActive, currentUserId, onlineUsers, userStatuses, on
                       onClick={(e) => { e.stopPropagation(); setMenuOpen(false); onRemoveFromFolder?.() }}
                       className="w-full text-left px-4 py-2.5 text-sm text-cn-gray-700 hover:bg-cn-gray-100 flex items-center gap-2"
                     >
-                      <span>📤</span>
+                      <FolderMinusIcon className="w-4 h-4 flex-shrink-0" />
                       Remove from folder
                     </button>
                   )}
@@ -592,7 +694,6 @@ export default function Sidebar({ isOpen, onClose }) {
   const queryClient = useQueryClient()
   // Stable ref so socket closures always read the latest expanded chat id
   const openChatsRef = useRef(openChats)
-  const addFolderInputRef = useRef(null)
   useEffect(() => { openChatsRef.current = openChats }, [openChats])
   const expandedChatId = openChats.find((c) => !c.minimized)?.id
   const [conversations, setConversations] = useState(() => getPrefetchConversations() ?? [])
@@ -613,8 +714,7 @@ export default function Sidebar({ isOpen, onClose }) {
   const [showAdminModal, setShowAdminModal] = useState(false)
   const [confirmDialog, setConfirmDialog] = useState(null)
   const [folders, setFolders] = useState([])
-  const [newFolderName, setNewFolderName] = useState('')
-  const [showAddFolder, setShowAddFolder] = useState(false)
+  const [showSectionModal, setShowSectionModal] = useState(false)
   const [dmDragOver, setDmDragOver] = useState(false)
   const [groupDragOver, setGroupDragOver] = useState(false)
   const foldersLoadedRef = useRef(false)
@@ -686,13 +786,12 @@ export default function Sidebar({ isOpen, onClose }) {
     localStorage.setItem(`orgchat-folders-${user.id}`, JSON.stringify(folders))
   }, [folders, user?.id])
 
-  const handleAddFolder = () => {
-    const name = newFolderName.trim()
+  const handleAddFolder = (rawName) => {
+    const name = (rawName ?? '').trim()
     if (!name) return
     const color = FOLDER_COLORS[folders.length % FOLDER_COLORS.length]
     setFolders((prev) => [...prev, { id: crypto.randomUUID(), name, color, conversationIds: [] }])
-    setNewFolderName('')
-    setShowAddFolder(false)
+    setShowSectionModal(false)
   }
 
   // onMoveToFolder is overloaded: '__delete__' deletes the folder, '__rename__' renames it
@@ -1048,7 +1147,7 @@ export default function Sidebar({ isOpen, onClose }) {
         >
           {[
             { icon: PhoneIcon, label: 'Calls', path: '/call-history' },
-            { icon: CalendarIcon, label: 'Calendar', path: '/calendar', disabled: true },
+            { icon: CalendarIcon, label: 'Calendar', path: '/calendar' },
             { icon: ClipboardDocumentListIcon, label: 'Tasks', path: '/tasks' },
             { icon: PencilSquareIcon, label: 'Scribble', path: '/scribble' },
           ].map(({ icon: Icon, label, path, disabled }) => {
@@ -1099,20 +1198,29 @@ export default function Sidebar({ isOpen, onClose }) {
         <button
           type="button"
           onClick={() => openComposer('direct')}
-          className="cn-action-btn cn-action-btn--red flex items-center gap-1 px-3 py-2 text-xs font-bold rounded-full flex-1 justify-center relative overflow-hidden group whitespace-nowrap"
+          className="cn-action-btn cn-action-btn--red flex items-center gap-1.5 px-2 py-2 text-xs font-bold rounded-full flex-1 justify-center relative overflow-hidden group whitespace-nowrap"
         >
           <span className="cn-action-btn__shine" />
           <PlusIcon className="w-3 h-3 relative z-10 flex-shrink-0 transition-transform duration-300 group-hover:rotate-90" />
-          <span className="relative z-10">New Chat</span>
+          <span className="relative z-10">Chat</span>
         </button>
         <button
           type="button"
           onClick={() => openComposer('group')}
-          className="cn-action-btn cn-action-btn--blue flex items-center gap-1 px-3 py-2 text-xs font-bold rounded-full flex-1 justify-center relative overflow-hidden group whitespace-nowrap"
+          className="cn-action-btn cn-action-btn--blue flex items-center gap-1.5 px-2 py-2 text-xs font-bold rounded-full flex-1 justify-center relative overflow-hidden group whitespace-nowrap"
         >
           <span className="cn-action-btn__shine" />
           <UserGroupIcon className="w-3 h-3 relative z-10 flex-shrink-0 transition-transform duration-300 group-hover:scale-110 group-hover:-translate-y-0.5" />
-          <span className="relative z-10">New Group</span>
+          <span className="relative z-10">Group</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setShowSectionModal(true)}
+          className="cn-action-btn cn-action-btn--green flex items-center gap-1.5 px-2 py-2 text-xs font-bold rounded-full flex-1 justify-center relative overflow-hidden group whitespace-nowrap"
+        >
+          <span className="cn-action-btn__shine" />
+          <FolderPlusIcon className="w-3 h-3 relative z-10 flex-shrink-0 transition-transform duration-300 group-hover:scale-110 group-hover:-translate-y-0.5" />
+          <span className="relative z-10">Section</span>
         </button>
       </div>
 
@@ -1225,7 +1333,7 @@ export default function Sidebar({ isOpen, onClose }) {
               )}
 
 
-              {/* Folders */}
+              {/* Sections (folders) */}
               {folders.map((folder) => (
                 <FolderSection
                   key={folder.id}
@@ -1249,31 +1357,6 @@ export default function Sidebar({ isOpen, onClose }) {
                   activeConvIds={new Set(openChats.filter((c) => !c.minimized).map((c) => c.id))}
                 />
               ))}
-
-              {/* Add folder UI */}
-              {showAddFolder ? (
-                <div className="flex items-center gap-1.5 px-3 py-2 border-b border-cn-gray-100">
-                  <input
-                    ref={addFolderInputRef}
-                    value={newFolderName}
-                    onChange={(e) => setNewFolderName(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === 'Enter') handleAddFolder(); if (e.key === 'Escape') { setShowAddFolder(false); setNewFolderName('') } }}
-                    placeholder="Folder name…"
-                    autoFocus
-                    className="flex-1 bg-transparent text-xs text-cn-charcoal placeholder-cn-gray-400 focus:outline-none border-b border-cn-blue"
-                  />
-                  <button onClick={handleAddFolder} className="text-xs font-bold text-cn-blue hover:text-cn-blue-dark transition-fast">Add</button>
-                  <button onClick={() => { setShowAddFolder(false); setNewFolderName('') }} className="text-xs text-cn-gray-400 hover:text-cn-gray-600 transition-fast">✕</button>
-                </div>
-              ) : (
-                <button
-                  onClick={() => { setShowAddFolder(true); setTimeout(() => addFolderInputRef.current?.focus(), 0) }}
-                  className="w-full flex items-center gap-2 px-4 py-2 text-xs text-cn-gray-400 hover:text-cn-blue hover:bg-cn-gray-100 transition-fast border-b border-cn-gray-100"
-                >
-                  <span className="text-base leading-none">＋</span>
-                  <span>New Folder</span>
-                </button>
-              )}
 
               {/* Archived section — at the bottom, visible on scroll down */}
               <button
@@ -1357,8 +1440,15 @@ export default function Sidebar({ isOpen, onClose }) {
         </div>
         <button
           onClick={(e) => {
-             e.stopPropagation();
-             logout();
+            e.stopPropagation()
+            setConfirmDialog({
+              title: 'Sign Out',
+              message: "Are you sure you want to sign out?",
+              confirmLabel: 'Sign Out',
+              danger: false,
+              icon: ArrowRightOnRectangleIcon,
+              onConfirm: () => { setConfirmDialog(null); logout() },
+            })
           }}
           className="p-2 rounded-lg transition-all duration-200"
           style={{ color: 'var(--cn-gray-400)' }}
@@ -1389,6 +1479,12 @@ export default function Sidebar({ isOpen, onClose }) {
         onlineUsers={onlineUsers}
       />
     )}
+    {showSectionModal && (
+      <SectionModal
+        onClose={() => setShowSectionModal(false)}
+        onCreate={handleAddFolder}
+      />
+    )}
     {showProfileModal && (
       <ProfileSettingsModal onClose={() => setShowProfileModal(false)} />
     )}
@@ -1398,6 +1494,7 @@ export default function Sidebar({ isOpen, onClose }) {
         message={confirmDialog.message}
         confirmLabel={confirmDialog.confirmLabel}
         danger={confirmDialog.danger}
+        icon={confirmDialog.icon}
         onConfirm={confirmDialog.onConfirm}
         onCancel={() => setConfirmDialog(null)}
       />

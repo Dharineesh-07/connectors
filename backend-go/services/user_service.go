@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"math/big"
 	"strings"
@@ -73,13 +72,13 @@ func (s *UserService) CreateUser(adminID string, email, fullName string, departm
 		allowed := strings.Split(authDomain, ",")
 		domainOK := false
 		for _, d := range allowed {
-			if parts[1] == strings.TrimSpace(d) {
+			if strings.EqualFold(parts[1], strings.TrimSpace(d)) {
 				domainOK = true
 				break
 			}
 		}
 		if !domainOK {
-			return nil, fmt.Errorf("only %s email addresses are allowed", authDomain)
+			return nil, errors.New("Invalid credentials")
 		}
 	}
 

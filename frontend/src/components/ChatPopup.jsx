@@ -82,6 +82,18 @@ export default function ChatPopup({ conversationId, minimized }) {
   const scrollHeightBeforeRef = useRef(null)
   const scrollHandledRef = useRef(false)
 
+  useEffect(() => {
+    if (!isFullscreen) return
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        setIsFullscreen(false)
+      }
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [isFullscreen])
+
   const handleResizeMouseDown = useCallback((e) => {
     e.preventDefault()
     e.stopPropagation()
